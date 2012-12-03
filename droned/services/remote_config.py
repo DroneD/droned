@@ -264,7 +264,7 @@ def get_resource():
     """get the webserver resource from the droned service"""
     #thanks to twisted interface definitions we know whic argument is
     #the site object in which the original resource is attached.
-    return getService(dependant_service).service.args[1].resource
+    return getService(dependant_service).service.args[1].innerfactory.resource
 
 def add_hooks(occurrence):
     """hook into droned's default server resource"""

@@ -1,0 +1,712 @@
+#!/usr/bin/python
+import sys
+import os
+
+AGENT = None
+for i in os.environ.get('PATH').split(':'):
+    if os.path.exists(os.path.join(i, 'systemctl')):
+        AGENT = os.path.join(i,'systemctl')
+        break
+if not AGENT:
+    util.println('Sorry DroneD requires SystemD!!!')
+    sys.exit(1)
+
+try: #we should have epollreactor
+    from twisted.internet import epollreactor
+    epollreactor.install()
+except: pass
+
+try:
+    import cPickle as pickle
+except:
+    import pickle
+
+from twisted.internet import reactor, defer, protocol, task, endpoints
+from twisted.application import internet, service
+from twisted.protocols import amp
+from twisted.python import util, failure
+from twisted.spread import pb
+import signal
+import re
+
+#where did we come from?
+DIRECTORY = os.path.abspath(os.path.dirname(__file__))
+#cool we need this to find the config
+sys.path.insert(0, DIRECTORY)
+#setup our library path based on where we came from
+sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
+
+#we will borrow some of droned's api
+#import droned.logging
+from droned.entity import Entity
+from kitt.daemon import WatchDog
+from kitt.util import dictwrapper
+from kitt.decorators import synchronizedDeferred
+from droned.protocols.psproxy.apiwrapper import process
+from droned.protocols import ampcommands
+import copyright
+
+from kitt.decorators import debugCall
+###############################################################################
+# Command Invocation Support
+###############################################################################
+class _InstanceFactory(object):
+    """Used to build the process protocol."""
+    def __init__(self, r, instance, deferred):
+        self.reactor = r
+        self.instance = instance
+        self.deferred = deferred
+
+    def __repr__(self):
+        return "<ClientCreator factory: %r>" % (self.instance, )
+
+    def buildProtocol(self, addr):
+        if not self.deferred.called:
+            self.deferred.callback(self.instance)
+        return self.instance
+
+
+class ClientCreator(protocol.ClientCreator):
+    """Client Interface to launch an application"""
+    def spawn(self, executable, args=(), env={}, path=None, usePTY=0,
+              childFDS={0:'w',1:'r',2:'r'}, uid=None, gid=None):
+        """Adding application clientCreator to ClientCreator"""
+        #make sure to take care of the environment
+        _env = os.environ.copy()
+        _env.update(env)
+        env = _env.copy()
+
+        d = defer.Deferred()
+
+        f = _InstanceFactory(
+            self.reactor,
+            self.protocolClass(
+                *self.args,  
+                **self.kwargs
+            ),
+            d
+        )
+
+        self.reactor.spawnProcess(
+            f.buildProtocol(None),
+            executable,
+            args=args,
+            env=env,
+            path=path, 
+            usePTY=usePTY,
+            childFDs=childFDS,
+            uid=uid,
+            gid=gid
+        )
+        return d #return our deferred
+
+
+class DefaultProtocol(protocol.ProcessProtocol):
+    def __init__(self, *args, **kwargs):
+        self.deferredResult = args[-1] #deferred result is always the last arg
+        self._closeSTDIN = kwargs.get('close_stdin', True)
+        self._Buffer = kwargs.get('bufferstd', False)
+        self._Silence = kwargs.get('silenced', False)
+        self._process = None
+        self._exited = False
+        self._pid = -1
+        self._outbuf = ""
+        self._errbuf = ""
+
+    def connectionMade(self):
+        if self._closeSTDIN:
+            self.transport.closeStdin()
+        self._pid = self.transport.pid
+        self._process = process.Process(self.transport.pid)   
+        if not self._Silence:
+            MessageTracking.started(self._pid)
+
+    def outReceived(self, data):
+        if not self._Silence:
+            MessageTracking.stdout(self._pid,data)
+        if not self._Buffer: return
+        self._outbuf += data
+
+    def errReceived(self, data):
+        if not self._Silence:
+            MessageTracking.stderr(self._pid,data)
+        if not self._Buffer: return
+        self._errbuf += data
+
+    def processExited(self, reason):
+        """
+        called when the process fd's are closed and process is reaped.
+        """
+        if self._exited: return
+        self._exited = True
+        process.Process.delete(self._process)
+        setattr(reason.value, 'stdout', self._outbuf)
+        setattr(reason.value, 'stderr', self._errbuf)
+        if not self.deferredResult.called:
+            self.deferredResult.errback(reason)
+        if not self._Silence:
+            MessageTracking.exited(self._pid, reason.value.exitCode)
+
+
+def command(executable, args, **kwargs):
+    """Execute commandline application via the reactor."""
+    deferredResult = defer.Deferred()
+    #for convience
+    usePTY = kwargs.pop('usePTY', False)
+    proto = kwargs.pop('protocol', DefaultProtocol)
+    path = kwargs.pop('path', os.path.sep)
+    env = kwargs.pop('env', os.environ.copy())
+    childFDS = kwargs.pop('childFDS', {0:'w',1:'r',2:'r'})
+    uid = kwargs.pop('uid', None)
+    gid = kwargs.pop('gid', None)
+    proto_args = tuple(kwargs.pop('proto_args', []))
+    proto_args += (deferredResult,)
+    #laziness hack
+    def _fix_args(cmd, a):
+        """I fix your commandline args b/c you are probably lazy like me"""
+        first = cmd.split(os.path.sep)[-1]
+        if not len(a):
+            a = (first,)
+            return a
+        if first != a[0]:
+            a = (first,) + tuple(a)
+        return a
+    newargs = []
+    #sanitize arguments, b/c devs do silly things ... including myself
+    for i in list(_fix_args(executable, args)):
+        newargs += i.split(' ')
+    args = tuple(newargs)
+
+    #setup the client application to run
+    app = ClientCreator(reactor, proto, *proto_args, **kwargs)
+    deferredSpawn = app.spawn(
+        executable, args, env, path, usePTY, childFDS, uid, gid)
+
+    #If the spawn fails the protocol task fails
+    deferredSpawn.addErrback(
+        lambda f: deferredResult.called or
+        deferredResult.errback(f)
+    )
+    return deferredResult
+
+
+###############################################################################
+# Process Watcher Support
+###############################################################################
+SERVICE = None
+
+
+def extractData(func):
+    def extract(result):
+        if isinstance(result, list):
+            newList = []
+            for item in result:
+                newList.append(extract(item))
+            return newList
+        if isinstance(result, dict):
+            newDict = {}
+            for var, val in result.items():
+                newDict[var] = extract(val)
+            return newDict
+        if hasattr(result, '__dict__'):
+            return dict(result.__dict__)
+        return result
+    def extractFailure(reason):
+        return failure.Failure(
+            pb.RemoteError(reason.type, reason.value, reason.printTraceback))
+    def decorator(self, *args, **kwargs):
+        d = defer.maybeDeferred(func, self, *args, **kwargs)
+        d.addCallback(extract)
+        d.addErrback(extractFailure)
+        return d
+    return decorator
+
+
+@process.threaded
+def proc(pid):
+    return process.Process(pid)
+
+
+class ProcessRoot(pb.Root):
+    """Provides the System Information Remote API"""
+    ###########################################################################
+    # System Wide API is defined in this block
+    ###########################################################################
+    def __init__(self, *args, **kwargs):
+        self.tracker = kwargs.pop('tracker')
+
+    def proc(self, pid):
+        return self.tracker.process_cache[pid]
+
+    @extractData
+    def remote_process_list(self):
+        return self.tracker.process_cache.keys()
+
+    @extractData
+    def remote_pid_exists(self, pid):
+        return process.pid_exists(pid)
+
+    @extractData
+    def remote_phymem_usage(self):
+        return process.phymem_usage()
+
+    @extractData
+    def remote_phymem_buffers(self):
+        return process.phymem_buffers()
+
+    @extractData
+    def remote_disk_io_counters(self):
+        return process.disk_io_counters()
+
+    @extractData
+    def remote_cpu_percent(self, interval=0.1, percpu=False):
+        return process.cpu_percent(interval=interval,percpu=percpu)
+
+    @extractData
+    def remote_network_io_counters(self, pernic=False):
+        return process.network_io_counters(pernic=pernic)
+
+    @extractData
+    def remote_find_processes(self, regex='.*'):
+        regex = re.compile(regex)
+        result = []
+        for var, val in self.tracker.process_cache.items():
+            try:
+                if regex.search(' '.join(val.cmdline)):
+                    result.append(var) 
+            except: continue
+        return result
+    ###########################################################################
+    # Process API is defined in this block
+    ###########################################################################
+    @extractData
+    def remote_process_get_connections(self, pid, kind='inet'):
+        return proc(pid).addCallback(
+            lambda x: x.get_connections(kind=kind))
+
+    @extractData
+    def remote_process_get_cpu_percent(self, pid, interval=0.1):
+        return proc(pid).addCallback(
+            lambda x: x.get_cpu_percent(interval=interval))
+
+    @extractData
+    def remote_process_get_cpu_times(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_cpu_times())
+
+    @extractData
+    def remote_process_get_io_counters(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_io_counters())
+
+    @extractData
+    def remote_process_get_ionice(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_ionice())
+
+    @extractData
+    def remote_process_get_memory_info(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_memory_info())
+    
+    @extractData
+    def remote_process_get_memory_percent(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_memory_percent())
+
+    @extractData
+    def get_num_threads(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_num_threads())
+
+    @extractData
+    def remote_process_get_open_files(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_open_files())
+
+    @extractData
+    def remote_process_get_threads(self, pid):
+        return proc(pid).addCallback(lambda x: x.get_threads())
+
+    @extractData
+    def remote_process_getcwd(self, pid):
+        return proc(pid).addCallback(lambda x: x.getcwd())
+
+    @extractData
+    def remote_process_is_running(self, pid):
+        return proc(pid).addCallback(lambda x: x.is_running())
+
+
+class ProcessTracking(Entity):
+    """Track processes as long as we have connections."""
+    process_cache = property(lambda s: s._process_cache)
+    def __init__(self, interval):
+        self._interval = interval
+        self._connections = set()
+        self._process_cache = {}
+        self._deferred = defer.succeed({})
+        self._task = task.LoopingCall(self._scheduler)
+
+    def add(self, addr):
+        """add tracked connection"""
+        self._connections.add(addr)
+        if not self._task.running:
+            self._task.start(self._interval)
+
+    def discard(self, addr):
+        """discard tracked connection"""
+        self._connections.discard(addr)
+        if not self._connections:
+            if self._task.running:
+                self._task.stop()
+
+    def _scheduler(self):
+        if self._deferred.called:
+            util.println('Scanning Process Table.')
+            self._deferred = self._process_scanner({})
+            self._deferred.addCallback(self._updateState)
+            self._deferred.addErrback(lambda x: {})
+        return self._deferred
+
+    def _updateState(self, resultDict):
+        self._process_cache = resultDict
+        util.println('Process Table Scan Completed.')
+        return resultDict
+
+    @process.threaded
+    def _process_scanner(self, results):
+        for p in process.process_iter():
+            try:
+                results.update({p.pid: p})
+            except: continue
+        return results
+
+
+class NotifyingPBServerFactory(pb.PBServerFactory):
+    allConnections = set()
+    def buildProtocol(self, addr):
+        protocol = pb.PBServerFactory.buildProtocol(self, addr)
+        protocol.notifyOnConnect(lambda: self.allConnections.add(addr)) 
+#        protocol.notifyOnConnect(self.server.restartTask)
+        protocol.notifyOnDisconnect(lambda: self.allConnections.discard(addr))
+        return protocol
+
+###############################################################################
+# DroneD Feedback mechanism.
+###############################################################################
+class MessageTracking(Entity):
+    def __init__(self):
+        self._connections = set()
+
+    def add(self, connection):
+        self._connections.add(connection)
+
+    def discard(self, connection):
+        self._connections.discard(connection)
+
+    def started(self, pid):
+        results = []
+        try: process.Process(pid)
+        except: pass
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessStarted,pid=pid)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
+
+    def stdout(self, pid, data):
+        results = []
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessStdout,pid=pid,data=data)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
+
+    def stderr(self, pid, data):
+        results = []
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessStderr,pid=pid,data=data)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
+
+    def exited(self, pid, exitCode):
+        s = process.Process._safeID(pid)
+        x = process.Process._instanceMap.get(s, None)
+        if x: process.Process.delete(x)
+        results = []
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessExited,pid=pid,exitCode=exitCode)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
+MessageTracking = MessageTracking()
+
+
+class AMPProtocol(amp.AMP):
+    def connectionMade(self):
+        self.factory.notify.add(self)
+        for systemd in SystemDService.objects:
+            self.callRemote(
+                ampcommands.SystemDSettings, state=pickle.dumps(systemd.__getstate__()))
+        return amp.AMP.connectionMade(self)
+
+    def connectionLost(self, reason):
+        self.factory.notify.discard(self)
+        return amp.AMP.connectionLost(self, reason)
+
+    @ampcommands.SystemCtrl.responder
+    def gov_systemctl(self, service, action, argstr):
+        if argstr:
+            return getattr(SystemDService(service), action)(*argstr.split(' '))
+        return getattr(SystemDService(service), action)()
+
+    @ampcommands.Command.responder
+    def gov_command(self, pickledArguments):
+        options = pickle.loads(pickledArguments)
+        if not 'uid' in options['kwargs']:
+            options['kwargs']['uid'] = config.running_uid
+        if not 'gid' in options['kwargs']:
+            options['kwargs']['gid'] = config.running_gid
+        d = command(options['exec'], *options['args'], **options['kwargs'])
+        d.addBoth(self._gov_processResult)
+        return d
+
+    def _gov_processResult(self, result):
+        exitCode = result.value.exitCode
+        description = result.value.message
+        try:
+            sig = KNOWN_SIGNALS.get(result.value.signal, str(None))
+        except:
+            sig = 0
+        status = result.value.status or 0
+        return {
+            'code': exitCode, 
+            'description': description,
+            'status': status,
+            'signal': str(sig)
+        }
+
+
+class AMPServerFactory(protocol.ServerFactory):
+    protocol = AMPProtocol
+    notify = MessageTracking
+    def buildProtocol(self, addr):
+        protocol = self.protocol()
+        protocol.factory = self
+        return protocol
+
+
+###############################################################################
+# Signal Setup.
+###############################################################################
+KNOWN_SIGNALS = dict(
+    (k, v) for v, k in signal.__dict__.iteritems() 
+    if v.startswith('SIG') and not v.startswith('SIG_')
+)
+
+def handleSignal(signum, frame):
+    util.println("Received: %s" % (KNOWN_SIGNALS[signum],))
+    return
+    if KNOWN_SIGNALS[signum] == 'SIGHUP':
+        util.println('Restarting DroneD.')
+        d = command(AGENT,('restart','droned.service'))
+        d.addBoth(lambda x: None)
+    if KNOWN_SIGNALS[signum] == 'SIGTERM':
+        util.println('Stopping DroneD.')
+        d = command(AGENT, ('stop', 'droned.service'))
+        d.addBoth(lambda x: reactor.stop())
+
+def installSignalHandler():
+    signal.signal(signal.SIGHUP, handleSignal)
+    signal.signal(signal.SIGTERM, handleSignal)
+
+
+class SystemDService(Entity):
+    """Encapsulate SystemD Services."""
+    def __init__(self, name):
+        self.name = name
+        self.data = {}
+
+    def __getstate__(self):
+        return {
+            'name': self.name,
+            'methods': {
+                'start':   [(), self.start.__doc__],
+                'stop':    [(), self.stop.__doc__],
+                'status':  [(), self.status.__doc__],
+                'restart': [(), self.restart.__doc__],
+                'enable':  [(), self.enable.__doc__],
+                'disable': [(), self.disable.__doc__],
+                'show':    [(), self.show.__doc__],
+                'value':   [('key',), self.value.__doc__]
+            }
+        }
+
+    def value(self, key):
+        """Get systemd value by key"""
+        return {
+            'description': str(self.data.get(key, None)),
+            'code': 0,
+            'status': 0,
+            'signal': '0'
+        }
+
+    @defer.inlineCallbacks
+    def enable(self):
+        """Enable systemd service"""
+        yield self(('enable',))
+        result = yield self.status()
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def disable(self):
+        """Disable systemd service"""
+        yield self(('disable',))
+        result = yield self.status()
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def restart(self):
+        """Restart systemd service"""
+        pid = int(self.data.get('MainPID', 0))
+        if pid:
+            MessageTracking.exited(pid, 0)
+        yield self(('restart',))
+        result = yield self.status()
+        pid = int(self.data.get('MainPID', 0))
+        if pid and not result['code']:
+            MessageTracking.started(pid)
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def show(self):
+        """Show systemd settings."""
+        result = yield self(('show',))
+        result.pop('stderr')
+        result['description'] = result.pop('stdout')
+        for line in result['description'].split('\n'):
+            if not line: continue
+            data = line.split('=',1)
+            self.data[data[0]] = data[1]
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def start(self):
+        """Start systemd service"""
+        opid = int(self.data.get('MainPID', 0))
+        r = yield self(('start',))
+        result = yield self.status()
+        pid = int(self.data.get('MainPID', 0))
+        if pid and not r['code'] or pid != opid and pid:
+            MessageTracking.started(pid)
+        yield self.show()
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def stop(self):
+        """Start systemd service"""
+        pid = int(self.data.get('MainPID', 0))
+        r = yield self(('stop',))
+        result = yield self.status()
+        if pid and not r['code']:
+            MessageTracking.exited(pid, r['code'])
+        yield self.show()
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def status(self):
+        """Show systemd status"""
+        result = yield self(('status',))
+        result.pop('stderr')
+        result['description'] = result.pop('stdout')
+        yield self.show()
+        defer.returnValue(result)
+
+    @defer.inlineCallbacks
+    def __call__(self, args):
+        result = {}
+        try:
+            result = yield command(
+                AGENT, ('--no-pager','--no-legend') + args + (self.name,),
+                bufferstd=True, silenced=True)
+        except:
+            f = failure.Failure()
+            status = f.value.status or 0
+            try:
+                sig = f.value.signal
+            except:
+                sig = 0
+            result = {
+                'code': f.value.exitCode,
+                'stdout': f.value.stdout,
+                'stderr': f.value.stderr,
+                'signal': str(sig),
+                'status': status
+            }
+        defer.returnValue(result)
+            
+
+class SystemDManager(Entity):
+    args = ('--no-pager', '--no-legend', '--type=service', 'list-unit-files')
+    def __init__(self):
+        d = command(AGENT, SystemDManager.args, bufferstd=True)
+        d.addErrback(self._process_units)
+
+    @defer.inlineCallbacks
+    def _process_units(self, reason):
+        util.println("Checking with SystemD for Service Information.")
+        for line in reason.value.stdout.split('\n'):
+            if not line: continue
+            try:
+                yield SystemDService(line.split(' ')[0]).show()
+            except: pass
+        util.println("Finished Checking SystemD.")
+
+
+###############################################################################
+# Main Setup
+###############################################################################
+def main():
+    import config
+    globals()['config'] = config
+
+    import grp
+    import pwd
+    # Get the uid/gid from the name
+    config.running_uid = pwd.getpwnam(config.DRONED_USER).pw_uid
+    config.running_gid = grp.getgrnam(config.DRONED_GROUP).gr_gid
+
+    util.println("Initializing SystemD watch dog subsystem.")
+    #keep us running.
+    watchdog = WatchDog()
+
+    application = service.Application('droned')
+    reactor.callWhenRunning(
+        service.IService(application).startService
+    )
+
+    tracker = ProcessTracking(60.0)
+    NotifyingPBServerFactory.allConnections = tracker
+    fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
+    server = endpoints.serverFromString(reactor, fixserver)
+    reactor.callWhenRunning(
+        server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
+    
+    fixserver = config.DRONED_COMMAND_ENDPOINT.replace('path=','')
+    s = endpoints.serverFromString(reactor, fixserver)
+    reactor.callWhenRunning(s.listen, AMPServerFactory())
+    #the signal handler must be installed after the reactor is running!!!
+    reactor.callWhenRunning(installSignalHandler)
+    reactor.callWhenRunning(watchdog.start)
+    reactor.callWhenRunning(SystemDManager)
+    #warm up the process cache.
+    reactor.callWhenRunning(tracker._scheduler)
+    #watch dog setup
+    reactor.addSystemEventTrigger('during', 'shutdown', watchdog.stop)
+    reactor.addSystemEventTrigger('before', 'shutdown',
+        service.IService(application).stopService
+    )
+    util.println("Entering Event Loop.")
+    reactor.run()
+    util.println('Droned Exiting.')
+    sys.exit(0)
+
+if __name__ == '__main__': main()

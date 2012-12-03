@@ -80,8 +80,10 @@ class BlasterResult(object):
 
            returns dict (result) - output is the same as input
         """
-        for var, val in result.items():
-            self.write('%(server)s:%(port)s\t-> %(code)d: "%(description)s"' % val)
+        for (server,port), val in result.items():
+            if not val: continue
+            val.update({'server': server, 'port': port})
+            self.write('%(server)s:%(port)d\t-> %(code)d: "%(description)s"' % val)
             if DEBUG and 'stacktrace' in val:
                 self.write('Received Stacktrace from %(server)s:\n%(stacktrace)s\n\n' % val)
             self.returncode += abs(val['code']) 

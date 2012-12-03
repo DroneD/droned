@@ -1,0 +1,487 @@
+#!/usr/bin/python
+###############################################################################
+#   Copyright 2006 to the present, Orbitz Worldwide, LLC.
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+###############################################################################
+
+
+import os
+import sys
+import signal
+import copyright
+
+###############################################################################
+# SystemD Ready on Linux, thanks to following this guide.
+# http://0pointer.de/public/systemd-man/daemon.html
+###############################################################################
+__author__ = "Justin Venus <justin.venus@orbitz.com>"
+
+#where did we come from?
+DIRECTORY = os.path.abspath(os.path.dirname(__file__))
+#cool we need this to find the config
+sys.path.insert(0, DIRECTORY)
+#setup our library path based on where we came from
+sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
+
+try:
+    from twisted.internet import epollreactor
+    epollreactor.install()
+except: pass
+from twisted.internet import reactor
+
+try:
+    import cPickle as pickle
+except:
+    import pickle
+
+###############################################################################
+# Command line parser.
+###############################################################################
+class Daemon(object):
+    SIGNALS = dict((k, v) for v, k in signal.__dict__.iteritems() if \
+        v.startswith('SIG') and not v.startswith('SIG_'))
+
+    def __init__(self):
+        self.running = False
+
+    def _protect(self):
+        self.running = True
+
+    #emit events when we receive signals
+    def signal_emitter(self, signum, frame):
+        """trap as many os signals as we can and the send the signal as an event
+           !!only call this right before reactor.run
+        """
+        if signum == signal.SIGTERM:
+            #suppress further signals
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            self.log('Received SIGTERM Shutting Down in 5 seconds')
+            reactor.callLater(5.0, reactor.stop)
+        #imported below in this file
+        Event('signal').fire(
+            signum=signum,
+            signame=self.SIGNALS[signum],
+            frame=frame
+        )
+
+    def log(self, message):
+        """log helper eventually maps to a log observer"""
+        sys.stdout.write(str(message)+'\n')
+
+    def drop_privileges(self):
+        """drop privileges, and terminate the parent process"""
+        if os.getuid() != 0:
+            # We're not root so, like, whatever dude
+            reactor.fireSystemEvent('priviledges')
+            return
+
+        import grp
+        import pwd
+        # Get the uid/gid from the name
+        running_uid = pwd.getpwnam(config.DRONED_USER).pw_uid
+        running_gid = grp.getgrnam(config.DRONED_GROUP).gr_gid
+        self.log('set uid/gid %d/%d\n' % (running_uid,running_gid))
+  
+        # Remove group privileges
+        os.setgroups([])
+  
+        # Try setting the new uid/gid
+        os.setgid(running_gid)
+        os.setuid(running_uid)
+        # let services know it is ok to start
+        reactor.fireSystemEvent('priviledges')
+        #prevent this from being called ever again
+        self.drop_privileges = lambda: None
+
+    def __call__(self, *args, **kwargs):
+        reactor.callWhenRunning(self.drop_privileges)
+        return 0
+
+    def suppress_signals(self):
+        """install a signal handler"""
+        if config.DEBUG_EVENTS: return
+        for signum, signame in self.SIGNALS.items():
+            if signame in ('SIGKILL',): continue
+            if signame in ('SIGCHLD',): continue
+            try: signal.signal(signum, self.signal_emitter)
+            except RuntimeError: pass #tried to set an invalid signal
+        #prevent this from being called again
+        self.suppress_signals = lambda: None
+
+###############################################################################
+# Parse options and get ready to run
+###############################################################################
+try:
+    import config
+    drone = Daemon()
+    drone() #lets daemonize (assuming !nodaemon) and get going
+except SystemExit: raise
+except:
+    from twisted.python.failure import Failure
+    from kitt.util import getException
+    failure = Failure()
+    #use sys.stderr b/c we may have failed to create the class
+    sys.stderr.write('%s: %s\n' % (sys.argv[0], failure.getErrorMessage()))
+    sys.stderr.write('%s: Try --help for usage details.\n' % (sys.argv[0]))
+    sys.exit(1)
+
+#compatibility
+config.reactor = reactor
+reactor.callWhenRunning(drone.log, "DroneD reactor is now running.")
+
+import droned.logging
+droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
+drone.log('logging subsystem initialized')
+
+from twisted.application import service
+from twisted.internet import defer, endpoints, protocol
+from twisted.python.failure import Failure
+from twisted.python.log import err
+from droned.entity import Entity
+
+###############################################################################
+# Setup basic logging working as soon as possible
+###############################################################################
+
+###############################################################################
+# Setup our configuration from ENV or use sane defaults
+###############################################################################
+
+#if true deferreds will be traceable
+defer.setDebugging(config.DEBUG_EVENTS)
+
+###############################################################################
+# Setup our application services
+###############################################################################
+class ServiceManager(Entity):
+    """ServiceManager Provides an Interface to get to any
+       methods a service may provide.
+       
+       After the ServiceManager has been instantiated you can
+       access services from any python package in the DroneD
+       framework simply by placing ```import services``` in
+       your code.
+    """
+    parentService = property(lambda s: s._parent)
+    serializable = False #would not be discovered in this file anyway
+    def __init__(self):
+        if 'services' in sys.modules:
+            e = "Instantiate ServiceManager before the services module!"
+            raise AssertionError(e)
+        self.SERVICE_STATE = {}
+        self._parent = None
+        drone.log('Loading Services')
+        import services
+        mask = ('loadAll',) #mask as private
+        #truely become service module
+        for var, val in vars(services).items():
+            if var.startswith('_'): continue
+            if var in mask: continue
+            setattr(self, var, val) #bind the module globals to self
+        services.loadAll() #load all services before replacing module
+        sys.modules['services'] = self #replace the services module
+
+        from droned.models.action import AdminAction
+        #droneblaster action hooks
+        self._action = AdminAction('service')
+        self._action.expose('start', self._startService, ('name',),
+            'starts the service'
+        )
+        self._action.expose('stop', self._stopService, ('name',),
+            'stops the service'
+        )
+        self._action.expose('disable', self._disableService, ('name',),
+            'prevent the service from starting'
+        )
+        self._action.expose('enable', self._enableService, ('name',),
+            'allow the service to start'
+        )
+        self._action.expose('status', self._statusService, ('name',),
+            'status of the service'
+        )
+        self._action.expose('list', lambda: \
+                self._action.resultContext('\n'.join([ i for i in \
+                    self.EXPORTED_SERVICES.keys() ]), None),
+            (), 'list all services'
+        )
+        self._action.buildDoc() #finalize the admin action
+
+    def _installServices(self, parentService):
+        """Install Services for DroneD to run
+
+           @param parentService (instance service.Application)
+           @return None
+        """
+        drone.log('Installing Services')
+        self._parent = parentService
+        dead = set() #track objects that blow up on setup
+        for name,obj in self.EXPORTED_SERVICES.items():
+            try:
+                #decorate start and stop methods for eventing
+                obj.start = self._startDecorator(obj.start, name)
+                obj.stop = self._stopDecorator(obj.stop, name)
+                obj.install(self.parentService) #set the twisted parent service
+                obj.parentService = self.parentService #make sure it's set
+            except:
+                err(Failure(), 'Exception while installing %s' % (name,))
+                dead.add(name)
+
+        drone.log('Evaluating Services Startup')
+        #start up services that should run after everything is setup
+        for name,obj in self.EXPORTED_SERVICES.items():
+            if name in dead: continue
+            #make sure we have a notion of dis/enabled
+            if name not in self.SERVICE_STATE:
+                self.SERVICE_STATE[name] = name in config.AUTOSTART_SERVICES
+            #service is not in autostart and is not marked to start
+            if name not in config.AUTOSTART_SERVICES:
+                if not self.SERVICE_STATE[name]:
+                    continue
+            #service is marked as down even though it is in AUTO_START
+            elif not self.SERVICE_STATE[name]: continue
+            try:
+                self.SERVICE_STATE[name] = True #be safe
+                self._startService(name)
+            except: #logging is not setup yet use twisted's err facility
+                err(Failure(), 'Exception while registering %s' % (name,))
+
+    def _statusService(self, name):
+        """used by the AdminAction handler"""
+        status = self.getService(name).running() and 'running and' or \
+                'stopped and'
+        status += self.SERVICE_STATE.get(name, False) and ' enabled' or \
+                ' disabled'
+        return self._result(status, name)
+
+    def _startService(self, name):
+        """used by the AdminAction handler"""
+        obj = self.getService(name)
+        if not obj.running():
+            result = obj.start()
+            if isinstance(result, Failure): return result
+        return self._result('running', name)
+
+    def _stopService(self, name):
+        """used by the AdminAction handler"""
+        obj = self.getService(name)
+        if obj.running():
+            result = obj.stop()
+            if isinstance(result, Failure): return result
+        return self._result('stopped', name)
+
+    def _enableService(self, name):
+        """used by the AdminAction handler"""
+        self.SERVICE_STATE[name] = True #mark service as runnable
+        return self._result('enabled', name)
+
+    def _disableService(self, name):
+        """used by the AdminAction handler"""
+        self.SERVICE_STATE[name] = False #mark service as unrunnable
+        return self._result('disabled', name)
+
+    def _result(self, description, name):
+        template = '[%(application)s] %(description)s'
+        context = {'application': name, 'description': description}
+        return self._action.resultContext(template, None, **context)
+
+    def _startDecorator(self, func, name):
+        """decorate the service start method for eventing"""
+        log = droned.logging.logWithContext(type=name)
+        obj = self.getService(name)
+        def newfunc():
+            try:
+                if not self.SERVICE_STATE[name]:
+                    raise AssertionError('%s is disabled' % (name,))
+                if not obj.running():
+                    log('Starting Service')
+                    func() #don't really care about the return
+                    if not obj.running():
+                        raise AssertionError("%s not running" % (name,))
+                    Event('service-started').fire(service=obj)
+                    log('Started Service')
+            except: return Failure()
+            return True
+        return newfunc
+
+    def _stopDecorator(self, func, name):
+        """decorate the service stop method for eventing"""
+        log = droned.logging.logWithContext(type=name)
+        obj = self.getService(name)
+        def newfunc():
+            try:
+                if obj.running():
+                    log('Stopping Service')
+                    func() #we don't really care about the return
+                    if obj.running():
+                        raise AssertionError("%s is still running" % (name,))
+                    Event('service-stopped').fire(service=obj)
+                    log('Stopped Service')
+            except: return Failure()
+            return True
+        return newfunc
+
+    def _stopAll(self):
+        for name in self.EXPORTED_SERVICES.keys():
+            self._stopService(name)
+
+    def __getattr__(self, param): #compatibility hack
+        try: return self.EXPORTED_SERVICES[param]
+        except KeyError:
+            return object.__getattr__(self, param)
+sm = ServiceManager()
+import services #provided by ServiceManager
+#this lets you have temporary root level permision prior to your
+#service actually starting, you should check to see if your service
+#is in config.AUTOSTART_SERVICES.
+reactor.fireSystemEvent('droned-configured')
+
+###############################################################################
+# Setup Log Handlers
+###############################################################################
+observer = droned.logging.logs['console']
+for srvc in vars(services)['EXPORTED_SERVICES'].keys():
+    droned.logging.logs[srvc] = observer
+
+#get all of our services ready to run
+from droned.models.environment import *
+import droned.events
+
+#load all known events
+droned.events.loadAll()
+
+#import event prior to installing services
+from droned.models.event import Event
+
+#load servers that are part of my environment from ROMEO
+env.loadServers()
+
+from droned.protocols import ampcommands
+from twisted.protocols import amp
+
+class Commands(amp.AMP):
+    @ampcommands.ProcessStarted.responder
+    def processStarted(self, pid):
+        Event('process-started').fire(pid=pid)
+        return {}
+
+    @ampcommands.ProcessStdout.responder
+    def processStdout(self, pid, data):
+        Event('process-stdout').fire(pid=pid, data=data)
+        return {}
+
+    @ampcommands.ProcessStderr.responder
+    def processStderr(self, pid, data):
+        Event('process-stderr').fire(pid=pid, data=data)
+        return {}
+
+    @ampcommands.ProcessExited.responder
+    def processExited(self, pid, exitCode):
+        Event('process-exited').fire(pid=pid, exitCode=exitCode)
+        return {}
+
+    @ampcommands.SystemDSettings.responder
+    def systemdState(self, state):
+        from droned.models.action import AdminAction
+        systemd = pickle.loads(state)
+        name = systemd['name'].replace('.service','')
+        keys = config.APPLICATIONS.keys() + config.SERVICES.keys()
+        run = any([x in [name, systemd['name']] for x in keys])
+        if not any([x in [name, systemd['name']] for x in keys]):
+            return {} #don't expose systemd services by default.
+        admin = AdminAction(name)
+        for var, val in systemd['methods'].items():
+            admin.unexpose(var)
+            admin.expose(
+                var,
+                Command().dispatch(systemd['name'], var),
+                val[0],
+                val[1]
+            )
+        admin.buildDoc()
+        return {}
+
+
+class Command(Entity):
+    def __init__(self):
+        import droned.clients
+        droned.clients.command = self.command
+
+    def dispatch(self, service, action):
+        def comm(*args):
+            a = ''
+            if args:
+                a = ' '.join(list(args))
+            return self.instance.callRemote(
+                ampcommands.SystemCtrl, service=service, action=action, argstr=a)
+        return comm
+
+    def command(self, executable, *args, **kwargs):
+        if not args:
+            args = [[]]
+        options = {
+            'exec': executable,
+            'args': args,
+            'kwargs': kwargs
+        }
+        return self.instance.callRemote(
+            ampcommands.Command, pickledArguments=pickle.dumps(options))
+
+class CommandFactory(protocol.ClientFactory):
+    protocol = Commands
+    def buildProtocol(self, addr):
+        protocol = self.protocol()
+        protocol.factory = self
+        Command().instance = protocol
+        return protocol
+
+from droned.clients import endpoint
+#setup the command/control interface to the master process.
+fixclient = config.DRONED_COMMAND_ENDPOINT.split(':mode=')[0]
+cClient = endpoint.reconnectingClientFromString(reactor, fixclient)
+reactor.callWhenRunning(cClient.connect, CommandFactory())
+
+
+###############################################################################
+# Twisted Application Container Setup
+###############################################################################
+
+#create the application service container
+application = service.Application("droned")
+
+#make sure the top level service container is ready to go
+reactor.callWhenRunning(
+    service.IService(application).startService
+)
+#install and start services after privledges drop
+reactor.addSystemEventTrigger('after', 'priviledges', 
+    sm._installServices, application
+)
+#make sure our services properly terminate
+reactor.addSystemEventTrigger('before', 'shutdown', sm._stopAll)
+#make twisted services properly terminate
+reactor.addSystemEventTrigger('before', 'shutdown',
+    service.IService(application).stopService
+)
+
+###############################################################################
+# Signal Handler and Reactor Startup
+###############################################################################
+
+#the signal handler must be installed after the reactor is running!!!
+reactor.callWhenRunning(drone.suppress_signals)
+#last step, turn the reactor loose
+drone.log('DroneD is starting the reactor.')
+reactor.run()
+drone.log('DroneD is now Exiting.')
+sys.exit(0) #done now, let's do this again sometime

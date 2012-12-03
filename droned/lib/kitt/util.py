@@ -110,15 +110,6 @@ def getAvailablePort():
   portsLock.release()
   return getAvailablePort()
 
-def unpackify(s):
-  'Unpacks the magic number from a DroneD message'
-  n = 0
-  while True:
-    n += struct.unpack("!B",s[-1])[0]
-    s = s[:-1]
-    if not s: return n
-    n <<= 8
-
 class dictwrapper(object):
   """
   A neat dictionary wrapper written by Chris Brinley.

@@ -31,7 +31,11 @@ class GremlinClient(object):
             "http://%(hostname)s:%(port)d/gremlin" % vars(s))
     def __init__(self, hostname, port):
         self.hostname = hostname
-        self.port = int(port)
+        try:
+            self.port = int(port)
+        except ValueError:
+            port = port.split(':').pop() 
+            self.port = int(port)
 
     @deferredAsThread
     def _deserialize(self, fd):
