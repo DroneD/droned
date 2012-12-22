@@ -225,6 +225,7 @@ fi
 %if %{systemd}
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/%{name}.service
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/private-drone.service
+%exclude %{_bindir}/%{name}
 %else
 %attr(755,root,root) %{_sysconfdir}/init.d/%{name}
 %config(noreplace) %attr(644,root,root) %{_sysconfdir}/sysconfig/%{name}

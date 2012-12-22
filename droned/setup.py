@@ -27,8 +27,8 @@ _f.close()
 
 copyright_module = "version = \"" + str(VERSION) + "\""
 copyright_module += """
-copyright = "Copyright (c) 2006 to the present, Orbitz Worldwide, LLC."
-copyright_notice = '''Copyright (c) 2006 to the present, Orbitz Worldwide, LLC.
+copyright = "Copyright (c) 2006 to 2012, Orbitz Worldwide, LLC."
+copyright_notice = '''Copyright (c) 2006 to 2012, Orbitz Worldwide, LLC.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -122,7 +122,9 @@ if os.environ.get('PRIME_SIZE'):
 doc_files = [ ('doc', [ os.path.join(WHEREAMI, i) for i in glob('doc/*') \
         if os.path.isfile(i)]) ]
 _data = [
-    'primes'
+    'primes',
+    'drone',
+    'droned'
 ]
 #fix for rpmbuild
 extra_files = [ ('.', [ os.path.join(WHEREAMI, i) for i in _data \
@@ -131,9 +133,9 @@ extra_files = [ ('.', [ os.path.join(WHEREAMI, i) for i in _data \
 setup(
     name='droned',
     version=VERSION,
-    url='https://github.com/OrbitzWorldwide/droned',
+    url='https://github.com/DroneD/droned',
     author='Justin Venus',
-    author_email='justin.venus@orbitz.com',
+    author_email='justin.venus@gmail.com',
     license='Apache Software License 2.0',
     description='DroneD - Application Service Framework',
     packages=[
