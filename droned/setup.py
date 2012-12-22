@@ -149,6 +149,8 @@ setup(
         'lib.droned.management',
         'lib.droned.management.dmx',
         'lib.droned.protocols',
+        'lib.droned.protocols.psproxy',
+        'lib.droned.protocols.psproxy.apiwrapper',
         'lib.droned.events',
         'lib.kitt',
         'lib.kitt.proc',

@@ -33,6 +33,7 @@ BuildRequires:	%{__python}
 Requires:	python-twisted
 Requires:	python-romeo
 Requires:	python-ctypes
+Requires:	python-psutil
 Requires(post):	openssl
 
 
