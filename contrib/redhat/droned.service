@@ -1,17 +1,17 @@
 [Unit]
 Description=The DroneD Server
-After=syslog.target network.target
+Requires=private-drone.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/droned --config=/etc/droned/droned.conf --nodaemon
+ExecStart=/usr/share/droned/drone --config=/etc/droned/droned.conf
 ExecReload=/bin/kill -HUP $MAINPID
 ExecStop=/bin/kill -TERM $MAINPID
 WatchdogSec=30s
 StartLimitInterval=5m
 StartLimitBurst=4
 Restart=on-failure
-KillMode=process
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=The DroneD Priviledged Server
+After=syslog.target network.target
+Before=droned.service
+
+[Service]
+Type=simple
+Nice=19
+IOSchedulingClass=idle
+#IOSchedulingPriority=7
+CPUSchedulingPolicy=idle
+#CPUSchedulingPriority=1
+CPUSchedulingResetOnFork=yes
+ExecStart=/usr/share/droned/droned --config=/etc/droned/droned.conf
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+WatchdogSec=30s
+StartLimitInterval=5m
+StartLimitBurst=4
+Restart=on-failure
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
