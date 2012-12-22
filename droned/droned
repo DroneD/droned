@@ -2,15 +2,6 @@
 import sys
 import os
 
-AGENT = None
-for i in os.environ.get('PATH').split(':'):
-    if os.path.exists(os.path.join(i, 'systemctl')):
-        AGENT = os.path.join(i,'systemctl')
-        break
-if not AGENT:
-    util.println('Sorry DroneD requires SystemD!!!')
-    sys.exit(1)
-
 try: #we should have epollreactor
     from twisted.internet import epollreactor
     epollreactor.install()
@@ -26,7 +17,6 @@ from twisted.application import internet, service
 from twisted.protocols import amp
 from twisted.python import util, failure
 from twisted.spread import pb
-import signal
 import re
 
 #where did we come from?
@@ -39,7 +29,6 @@ sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
 #we will borrow some of droned's api
 #import droned.logging
 from droned.entity import Entity
-from kitt.daemon import WatchDog
 from kitt.util import dictwrapper
 from kitt.decorators import synchronizedDeferred
 from droned.protocols.psproxy.apiwrapper import process
@@ -47,6 +36,8 @@ from droned.protocols import ampcommands
 import copyright
 
 from kitt.decorators import debugCall
+log = lambda message: sys.stdout.write(str(message)+'\n')
+
 ###############################################################################
 # Command Invocation Support
 ###############################################################################
@@ -355,15 +346,18 @@ class ProcessTracking(Entity):
 
     def _scheduler(self):
         if self._deferred.called:
-            util.println('Scanning Process Table.')
-            self._deferred = self._process_scanner({})
-            self._deferred.addCallback(self._updateState)
-            self._deferred.addErrback(lambda x: {})
+            if self._connections:
+                log('Scanning Process Table.')
+                self._deferred = self._process_scanner({})
+                self._deferred.addCallback(self._updateState)
+                self._deferred.addErrback(lambda x: {})
+            else:
+                self._deferred = defer.succeed({})
         return self._deferred
 
     def _updateState(self, resultDict):
         self._process_cache = resultDict
-        util.println('Process Table Scan Completed.')
+        log('Process Table Scan Completed.')
         return resultDict
 
     @process.threaded
@@ -380,7 +374,6 @@ class NotifyingPBServerFactory(pb.PBServerFactory):
     def buildProtocol(self, addr):
         protocol = pb.PBServerFactory.buildProtocol(self, addr)
         protocol.notifyOnConnect(lambda: self.allConnections.add(addr)) 
-#        protocol.notifyOnConnect(self.server.restartTask)
         protocol.notifyOnDisconnect(lambda: self.allConnections.discard(addr))
         return protocol
 
@@ -443,22 +436,21 @@ MessageTracking = MessageTracking()
 class AMPProtocol(amp.AMP):
     def connectionMade(self):
         self.factory.notify.add(self)
-        for systemd in SystemDService.objects:
+        for systemd in SystemService.objects:
             self.callRemote(
-                ampcommands.SystemDSettings, state=pickle.dumps(systemd.__getstate__()))
+                ampcommands.SystemSettings, state=pickle.dumps(systemd.__getstate__()))
         return amp.AMP.connectionMade(self)
 
     def connectionLost(self, reason):
         self.factory.notify.discard(self)
         return amp.AMP.connectionLost(self, reason)
 
-    @ampcommands.SystemCtrl.responder
     def gov_systemctl(self, service, action, argstr):
         if argstr:
-            return getattr(SystemDService(service), action)(*argstr.split(' '))
-        return getattr(SystemDService(service), action)()
+            return getattr(SystemService(service), action)(*argstr.split(' '))
+        return getattr(SystemService(service), action)()
+    ampcommands.SystemCtrl.responder(gov_systemctl)
 
-    @ampcommands.Command.responder
     def gov_command(self, pickledArguments):
         options = pickle.loads(pickledArguments)
         if not 'uid' in options['kwargs']:
@@ -468,6 +460,7 @@ class AMPProtocol(amp.AMP):
         d = command(options['exec'], *options['args'], **options['kwargs'])
         d.addBoth(self._gov_processResult)
         return d
+    ampcommands.Command.responder(gov_command)
 
     def _gov_processResult(self, result):
         exitCode = result.value.exitCode
@@ -494,33 +487,8 @@ class AMPServerFactory(protocol.ServerFactory):
         return protocol
 
 
-###############################################################################
-# Signal Setup.
-###############################################################################
-KNOWN_SIGNALS = dict(
-    (k, v) for v, k in signal.__dict__.iteritems() 
-    if v.startswith('SIG') and not v.startswith('SIG_')
-)
-
-def handleSignal(signum, frame):
-    util.println("Received: %s" % (KNOWN_SIGNALS[signum],))
-    return
-    if KNOWN_SIGNALS[signum] == 'SIGHUP':
-        util.println('Restarting DroneD.')
-        d = command(AGENT,('restart','droned.service'))
-        d.addBoth(lambda x: None)
-    if KNOWN_SIGNALS[signum] == 'SIGTERM':
-        util.println('Stopping DroneD.')
-        d = command(AGENT, ('stop', 'droned.service'))
-        d.addBoth(lambda x: reactor.stop())
-
-def installSignalHandler():
-    signal.signal(signal.SIGHUP, handleSignal)
-    signal.signal(signal.SIGTERM, handleSignal)
-
-
-class SystemDService(Entity):
-    """Encapsulate SystemD Services."""
+class SystemService(Entity):
+    """Encapsulate Services."""
     def __init__(self, name):
         self.name = name
         self.data = {}
@@ -551,25 +519,25 @@ class SystemDService(Entity):
 
     @defer.inlineCallbacks
     def enable(self):
-        """Enable systemd service"""
-        yield self(('enable',))
+        """enable service."""
+        yield self(config.system.enable(self.name))
         result = yield self.status()
         defer.returnValue(result)
 
     @defer.inlineCallbacks
     def disable(self):
-        """Disable systemd service"""
-        yield self(('disable',))
+        """disable service."""
+        yield self(config.system.disable(self.name))
         result = yield self.status()
         defer.returnValue(result)
 
     @defer.inlineCallbacks
     def restart(self):
-        """Restart systemd service"""
+        """restart service."""
         pid = int(self.data.get('MainPID', 0))
         if pid:
             MessageTracking.exited(pid, 0)
-        yield self(('restart',))
+        yield self(config.system.restart(self.name))
         result = yield self.status()
         pid = int(self.data.get('MainPID', 0))
         if pid and not result['code']:
@@ -578,8 +546,8 @@ class SystemDService(Entity):
 
     @defer.inlineCallbacks
     def show(self):
-        """Show systemd settings."""
-        result = yield self(('show',))
+        """show settings."""
+        result = yield self(config.system.show(self.name))
         result.pop('stderr')
         result['description'] = result.pop('stdout')
         for line in result['description'].split('\n'):
@@ -590,9 +558,9 @@ class SystemDService(Entity):
 
     @defer.inlineCallbacks
     def start(self):
-        """Start systemd service"""
+        """start service."""
         opid = int(self.data.get('MainPID', 0))
-        r = yield self(('start',))
+        r = yield self(config.system.start(self.name))
         result = yield self.status()
         pid = int(self.data.get('MainPID', 0))
         if pid and not r['code'] or pid != opid and pid:
@@ -602,9 +570,9 @@ class SystemDService(Entity):
 
     @defer.inlineCallbacks
     def stop(self):
-        """Start systemd service"""
+        """stop service."""
         pid = int(self.data.get('MainPID', 0))
-        r = yield self(('stop',))
+        r = yield self(config.system.stop(self.name))
         result = yield self.status()
         if pid and not r['code']:
             MessageTracking.exited(pid, r['code'])
@@ -613,8 +581,8 @@ class SystemDService(Entity):
 
     @defer.inlineCallbacks
     def status(self):
-        """Show systemd status"""
-        result = yield self(('status',))
+        """show status."""
+        result = yield self(config.system.status(self.name))
         result.pop('stderr')
         result['description'] = result.pop('stdout')
         yield self.show()
@@ -624,8 +592,7 @@ class SystemDService(Entity):
     def __call__(self, args):
         result = {}
         try:
-            result = yield command(
-                AGENT, ('--no-pager','--no-legend') + args + (self.name,),
+            result = yield command(args[0], args[1],
                 bufferstd=True, silenced=True)
         except:
             f = failure.Failure()
@@ -644,21 +611,21 @@ class SystemDService(Entity):
         defer.returnValue(result)
             
 
-class SystemDManager(Entity):
-    args = ('--no-pager', '--no-legend', '--type=service', 'list-unit-files')
+class SystemManager(Entity):
     def __init__(self):
-        d = command(AGENT, SystemDManager.args, bufferstd=True)
+        cmd, args = config.system.list()
+        d = command(cmd, args, bufferstd=True)
         d.addErrback(self._process_units)
 
     @defer.inlineCallbacks
     def _process_units(self, reason):
-        util.println("Checking with SystemD for Service Information.")
+        log("Checking for Service Information.")
         for line in reason.value.stdout.split('\n'):
             if not line: continue
             try:
-                yield SystemDService(line.split(' ')[0]).show()
+                yield SystemService(line.split(' ')[0]).show()
             except: pass
-        util.println("Finished Checking SystemD.")
+        log("Finished Checking System.")
 
 
 ###############################################################################
@@ -668,15 +635,14 @@ def main():
     import config
     globals()['config'] = config
 
+    import droned.logging
+    droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
+
     import grp
     import pwd
     # Get the uid/gid from the name
     config.running_uid = pwd.getpwnam(config.DRONED_USER).pw_uid
     config.running_gid = grp.getgrnam(config.DRONED_GROUP).gr_gid
-
-    util.println("Initializing SystemD watch dog subsystem.")
-    #keep us running.
-    watchdog = WatchDog()
 
     application = service.Application('droned')
     reactor.callWhenRunning(
@@ -693,20 +659,16 @@ def main():
     fixserver = config.DRONED_COMMAND_ENDPOINT.replace('path=','')
     s = endpoints.serverFromString(reactor, fixserver)
     reactor.callWhenRunning(s.listen, AMPServerFactory())
-    #the signal handler must be installed after the reactor is running!!!
-    reactor.callWhenRunning(installSignalHandler)
-    reactor.callWhenRunning(watchdog.start)
-    reactor.callWhenRunning(SystemDManager)
+    reactor.callWhenRunning(SystemManager)
     #warm up the process cache.
     reactor.callWhenRunning(tracker._scheduler)
     #watch dog setup
-    reactor.addSystemEventTrigger('during', 'shutdown', watchdog.stop)
     reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService
     )
-    util.println("Entering Event Loop.")
+    log("Entering Event Loop.")
     reactor.run()
-    util.println('Droned Exiting.')
+    log('Droned Exiting.')
     sys.exit(0)
 
 if __name__ == '__main__': main()

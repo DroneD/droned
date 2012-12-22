@@ -21,6 +21,7 @@ import copy
 import sys
 import os
 
+
 try:
     from kitt import rsa
     from kitt.util import dictwrapper
@@ -92,6 +93,66 @@ class Options(usage.Options):
         sys.exit(0)
 
 
+class SystemAgent(object):
+    """abstract system commands."""
+    systemd = property(lambda s: s._sysd)
+    agent = property(lambda s: s._agent_cmd)
+    def __init__(self):
+        self._agent_cmd = self._agent('systemctl')
+        self._sysd = bool(self._agent_cmd)
+        self._defaults = ('--no-pager', '--no-legend')
+        if not self.systemd:
+            self._agent_cmd = self._agent('service')
+            self._chkconfig = self._agent('chkconfig')
+
+    @staticmethod
+    def _agent(x):
+        for i in os.environ.get('PATH').split(':'):
+            if os.path.exists(os.path.join(i, x)):
+                return os.path.join(i,x)
+
+    def list(self):
+        if not self.systemd:
+            return (self._chkconfig, ('--list',))
+        return (self._agent_cmd,
+            self._defaults + ('--type=service', 'list-unit-files'))
+
+    def show(self, name):
+        if not self.systemd:
+            return (self._agent_cmd, (name, 'status'))
+        return (self._agent_cmd, self._defaults + ('show', name))
+
+    def disable(self, name):
+        if not self.systemd:
+            return (self._chkconfig, (name, 'off'))
+        return (self._agent_cmd, self._defaults + ('disable', name))
+
+    def enable(self, name):
+        if not self.systemd:
+            return (self._chkconfig, (name, 'on'))
+        return (self._agent_cmd, self._defaults + ('enable', name))
+
+    def start(self, name):
+        if not self.systemd:
+            return (self._agent_cmd, (name, 'start'))
+        return (self._agent_cmd, self._defaults + ('start', name))
+
+    def stop(self, name):
+        if not self.systemd:
+            return (self._agent_cmd, (name, 'stop'))
+        return (self._agent_cmd, self._defaults + ('stop', name))
+
+    def status(self, name):
+        if not self.systemd:
+            return (self._agent_cmd, (name, 'status'))
+        return (self._agent_cmd, self._defaults + ('status', name))
+
+    def restart(self, name):
+        if not self.systemd:
+            return (self._agent_cmd, (name, 'restart'))
+        return (self._agent_cmd, self._defaults + ('restart', name))
+
+
 class ConfigManager(romeo.entity.Entity):
     """ConfigManager Provides an Interface to get to any
        configuration item.
@@ -106,11 +167,18 @@ class ConfigManager(romeo.entity.Entity):
         self.data = {}
         options = Options()
         options.parseOptions()
+        #if we made it here we are running an application.
         self.drone = dictwrapper(dict(options))
         util.println('Initializing Configuration...')
         self.configure()
         util.println('Configuration is loaded.')
         sys.modules['config'] = self
+        #automatically subscribe to the watchdog
+        from twisted.internet import reactor
+        from kitt.daemon import WatchDog
+        watchdog = WatchDog()
+        reactor.callWhenRunning(watchdog.start)
+        reactor.addSystemEventTrigger('during', 'shutdown', watchdog.stop)
 
     def configure(self):
         """load configuration for the rest of us."""
@@ -161,6 +229,7 @@ class ConfigManager(romeo.entity.Entity):
             self.drone.rsadir, self.drone.privatekey + '.private')
 
         self.data = {
+            'system': SystemAgent(),
 #            'reactor': drone.reactor,
             'AUTOSTART_SERVICES': AUTOSTART_SERVICES,
             'EXCESSIVE_LOGGING': self.drone.debug,

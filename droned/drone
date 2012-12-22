@@ -144,6 +144,7 @@ import droned.logging
 droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
 drone.log('logging subsystem initialized')
 
+
 from twisted.application import service
 from twisted.internet import defer, endpoints, protocol
 from twisted.python.failure import Failure
@@ -370,27 +371,26 @@ from droned.protocols import ampcommands
 from twisted.protocols import amp
 
 class Commands(amp.AMP):
-    @ampcommands.ProcessStarted.responder
     def processStarted(self, pid):
         Event('process-started').fire(pid=pid)
         return {}
+    ampcommands.ProcessStarted.responder(processStarted)
 
-    @ampcommands.ProcessStdout.responder
     def processStdout(self, pid, data):
         Event('process-stdout').fire(pid=pid, data=data)
         return {}
+    ampcommands.ProcessStdout.responder(processStdout)
 
-    @ampcommands.ProcessStderr.responder
     def processStderr(self, pid, data):
         Event('process-stderr').fire(pid=pid, data=data)
         return {}
+    ampcommands.ProcessStderr.responder(processStderr)
 
-    @ampcommands.ProcessExited.responder
     def processExited(self, pid, exitCode):
         Event('process-exited').fire(pid=pid, exitCode=exitCode)
         return {}
+    ampcommands.ProcessExited.responder(processExited)
 
-    @ampcommands.SystemDSettings.responder
     def systemdState(self, state):
         from droned.models.action import AdminAction
         systemd = pickle.loads(state)
@@ -410,6 +410,7 @@ class Commands(amp.AMP):
             )
         admin.buildDoc()
         return {}
+    ampcommands.SystemSettings.responder(systemdState)
 
 
 class Command(Entity):
@@ -449,7 +450,8 @@ from droned.clients import endpoint
 #setup the command/control interface to the master process.
 fixclient = config.DRONED_COMMAND_ENDPOINT.split(':mode=')[0]
 cClient = endpoint.reconnectingClientFromString(reactor, fixclient)
-reactor.callWhenRunning(cClient.connect, CommandFactory())
+#gives the privledged server component a moment to start.
+reactor.callLater(5.0, cClient.connect, CommandFactory())
 
 
 ###############################################################################

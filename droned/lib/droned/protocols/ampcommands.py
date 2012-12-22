@@ -37,6 +37,6 @@ class Command(protocols.amp.Command):
                 ('signal', protocols.amp.String()),
                 ('status', protocols.amp.Integer())]
 
-class SystemDSettings(protocols.amp.Command):
+class SystemSettings(protocols.amp.Command):
     arguments = [('state', protocols.amp.String()),]
     response = []

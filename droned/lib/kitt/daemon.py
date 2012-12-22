@@ -87,6 +87,6 @@ class WatchDog(LoopingCall):
 
     def stop(self):
         if self.running:
-            return self.stop()
+            return LoopingCall.stop(self)
 
 __all__ = ['owndir','WatchDog']
