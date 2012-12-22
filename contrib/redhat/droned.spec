@@ -81,22 +81,6 @@ This utils package installs a number of command line tools for
 manipulating romeo environment description files.
 
 
-%package service
-Summary:	DroneD management of SystemV Init Services
-Group:		System Environment/Daemons
-Requires:	%{name} = %{version}
-#need for priv escalation, droned should not run as root
-Requires:	usermode
-#this next requires should be on every rh system by default
-Requires:	rpm-python
-
-
-%description service
-DroneD pam and console.app security configuration to manage SystemV INIT
-Services on a Linux system.  Should also work with systemd, but that isn't
-as heavily tested at this point in time.
-
-
 %prep
 %setup -q
 
@@ -140,6 +124,8 @@ egrep -v '*.pyo|*.pyc' %{name}/INSTALLED_FILES.orig | \
 #install redhat systemd units
 %{__install} -D contrib/redhat/%{name}.service \
 	$RPM_BUILD_ROOT/lib/systemd/system/%{name}.service
+%{__install} -D contrib/redhat/private-drone.service \
+	$RPM_BUILD_ROOT/lib/systemd/system/private-drone.service
 %else
 #install redhat SysV init settings
 %{__install} -D contrib/redhat/%{name}.init \
@@ -149,19 +135,6 @@ egrep -v '*.pyo|*.pyc' %{name}/INSTALLED_FILES.orig | \
 	$RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/%{name}
 %endif
 
-#install droned-service components from contrib
-%{__install} -D -m 644 contrib/redhat/%{name}-service.pamd_service \
-	$RPM_BUILD_ROOT%{_sysconfdir}/pam.d/service
-%{__install} -D -m 644 contrib/redhat/%{name}-service.console_appssecurity_service \
-	$RPM_BUILD_ROOT%{_sysconfdir}/security/console.apps/service
-
-#install rpmdb aware application plugin
-%{__install} -D -m 644 contrib/redhat/rh_service.py \
-	$RPM_BUILD_ROOT%{_datadir}/%{name}/lib/%{name}/applications/rh_service.py
-
-#hook service up to consolehelper
-ln -sn %{_bindir}/consolehelper \
-	$RPM_BUILD_ROOT%{_bindir}/service
 
 #write basic start configuration
 cat<<EOF_CONF > $RPM_BUILD_ROOT%{_sysconfdir}/%{name}/%{name}.conf
@@ -225,6 +198,8 @@ if [ $1 -eq 0 ] ; then
     # Package removal, not upgrade
     /bin/systemctl --no-reload disable %{name}.service > /dev/null 2>&1 || :
     /bin/systemctl stop %{name}.service > /dev/null 2>&1 || :
+    /bin/systemctl --no-reload disable private-drone.service > /dev/null 2>&1 || :
+    /bin/systemctl stop private-drone.service > /dev/null 2>&1 || :
 %else
     /sbin/service %{name} stop >/dev/null 2>&1 || :
     /sbin/chkconfig %{name} off >&/dev/null || :
@@ -237,7 +212,7 @@ fi
 /bin/systemctl daemon-reload >/dev/null 2>&1 || :
 if [ $1 -ge 1 ] ; then
     # Package upgrade, not uninstall
-    /bin/systemctl try-restart %{name}.service >/dev/null 2>&1 || :
+    /bin/systemctl try-restart private-drone.service >/dev/null 2>&1 || :
 fi
 %endif
 
@@ -276,21 +251,6 @@ fi
 %doc LICENSE
 %{_bindir}/rls
 %{_bindir}/createrdb
-
-
-%files service
-%defattr(-,root,root,-)
-%doc LICENSE README NEWS contrib/redhat/%{name}-service.yaml
-%{_bindir}/service
-%config(noreplace) %{_sysconfdir}/pam.d/service
-%config(noreplace) %{_sysconfdir}/security/console.apps/service
-%{_datadir}/%{name}/lib/%{name}/applications/rh_service.py*
-#so we don't collide with the base package
-%exclude %dir %{_datadir}
-%exclude %dir %{_datadir}/%{name}
-%exclude %dir %{_datadir}/%{name}/lib
-%exclude %dir %{_datadir}/%{name}/lib/%{name}
-%exclude %dir %{_datadir}/%{name}/lib/%{name}/applications
 
 
 %changelog
