@@ -82,6 +82,20 @@ This utils package installs a number of command line tools for
 manipulating romeo environment description files.
 
 
+%package rls2
+Summary:	Command line utility for examining configuration
+Group:		Applications/System
+Requires:	python-twisted
+
+
+%description rls2
+The provided utility is exactly like the rls command in romeo-utils,
+with the exception/enhancement of querying the environment information
+from any droned that can be contacted.  The provided utility is completely
+standalone, but it will need to interact with a droned somewhere on the
+network.
+
+
 %prep
 %setup -q
 
@@ -227,11 +241,12 @@ fi
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/%{name}.service
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/private-drone.service
 %exclude %{_bindir}/%{name}
+%exclude /var/log/%{name}
 %else
 %attr(755,root,root) %{_sysconfdir}/init.d/%{name}
 %config(noreplace) %attr(644,root,root) %{_sysconfdir}/sysconfig/%{name}
-%endif
 %dir /var/log/%{name}
+%endif
 %dir %{_sysconfdir}/pki/%{name}
 %if %{ghost_safe}
 %ghost %attr(600,root,root) %{_sysconfdir}/pki/%{name}/local.private
@@ -239,6 +254,7 @@ fi
 %endif
 %dir %{_datadir}/%{name}
 %dir /var/lib/%{name}
+%exclude %{_bindir}/rls2
 
 
 %files -n python-romeo -f romeo/INSTALLED_FILES
@@ -254,6 +270,12 @@ fi
 %doc LICENSE
 %{_bindir}/rls
 %{_bindir}/createrdb
+
+
+%files rls2
+%defattr(-,root,root,-)
+%doc LICENSE
+%{_bindir}/rls2
 
 
 %changelog

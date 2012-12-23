@@ -142,7 +142,6 @@ setup(
         '.',
         'services',
         'lib.droned',
-        'lib.droned.applications',
         'lib.droned.clients',
         'lib.droned.models',
         'lib.droned.management',
