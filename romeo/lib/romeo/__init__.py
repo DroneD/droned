@@ -114,7 +114,9 @@ def reload(datadir=None):
 
     from romeo.directives import Preprocessor
     pp = Preprocessor(datadir)
-    for f in _glob.glob('%s/*.yaml' % (datadir,)):
+    for f in _glob.glob('%s/*' % (datadir,)):
+        if not f.endswith('.yaml') or not f.endswith('.yml'):
+            continue
         try:
             fd = open(f, 'r')
             outstr = pp.pre_process(fd,f)
