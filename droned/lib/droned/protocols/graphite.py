@@ -18,11 +18,9 @@ try:
     import cPickle as pickle
 except ImportError:
     import pickle
-from twisted.internet.protocol import Protocol
-from twisted.python.failure import Failure
 from twisted.protocols.basic import Int32StringReceiver
 
-class GraphiteProtocol(Int32StringReceiver):
+class GraphiteProtocol(Int32StringReceiver,object):
     """base protocol for sending metrics to a Graphite Receiver"""
     metric = property(lambda s: s.get_metric())
     def __init__(self, *args, **kwargs):
