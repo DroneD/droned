@@ -18,7 +18,7 @@
 %{?__python2: %define __python %__python2}
 
 Name:		droned
-Version:        0.9.1
+Version:        1.9.1
 Release:	1%{?dist}
 Summary:	DroneD - Application Service Framework	
 
@@ -257,6 +257,10 @@ fi
 
 
 %changelog
+* Sat Dec 22 2012 Justin Venus <justin.venus@gmail.com> 1.9.1-1
+- Changing the way the base server works
+- The wire protocol has changed to AMP (not backwards compatible)
+
 * Sun Aug 26 2012 Justin Venus <justin.venus@orbitz.com> 0.9.1-1
 - Added caching to romeo library
 - Added new commandline utility createrdb
