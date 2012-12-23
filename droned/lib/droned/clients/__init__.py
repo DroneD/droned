@@ -14,8 +14,6 @@
 #   limitations under the License.
 ###############################################################################
 
-import os
-import sys
 from twisted.python.failure import Failure
 from twisted.internet import defer
 from twisted.internet.protocol import ClientCreator
