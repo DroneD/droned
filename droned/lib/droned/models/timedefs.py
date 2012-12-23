@@ -42,7 +42,3 @@ class Interval(Entity):
         mult = self.TIMESPANS[span_type]
         time_base = float(timestr[:-1])
         return time_base * mult 
-        
-# These come after our class definitions to avoid circular import dependencies
-from droned.models.droneserver import DroneD
-from droned.management.server import ServerManager

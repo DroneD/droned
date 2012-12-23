@@ -354,8 +354,6 @@ observer = droned.logging.logs['console']
 for srvc in vars(services)['EXPORTED_SERVICES'].keys():
     droned.logging.logs[srvc] = observer
 
-#get all of our services ready to run
-from droned.models.environment import *
 import droned.events
 
 #load all known events
@@ -363,9 +361,6 @@ droned.events.loadAll()
 
 #import event prior to installing services
 from droned.models.event import Event
-
-#load servers that are part of my environment from ROMEO
-env.loadServers()
 
 from droned.protocols import ampcommands
 from twisted.protocols import amp

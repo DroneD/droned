@@ -27,13 +27,7 @@ from kitt.interfaces import implements, IDroneModelServer
 class Server(Entity):
     implements(IDroneModelServer)
     connectFailure = None
-    appinstances = property( lambda self: (i for i in AppInstance.objects if \
-            i.server is self) )
-    apps = property( lambda self: (a for a in App.objects if self in a.shouldRunOn) )
-    scabs = property( lambda self: (s for s in Scab.objects if s.server is self) )
     unreachable = property( lambda self: self.connectFailure is not None )
-#FIXME this doesn't seem right we should remove it
-    installedApps = property( lambda self: set(av.app for av in self.installed) )
     debug = False
     serializable = True
     listed = False
@@ -41,24 +35,14 @@ class Server(Entity):
 
     def __init__(self, hostname):
         self.hostname = hostname
-        self.installed = {}
         self.droned = DroneD(self)
         self.manager = ServerManager(self)
 
     def __getstate__(self):
-        installed = {}
-        for appversion,configs in self.installed.items():
-            av = (appversion.app.name, appversion.version)
-            installed[av] = []
-            for configpkg in configs:
-                cp = (configpkg.name, configpkg.version)
-                installed[av].append(cp)
-
         return {
             'hostname' : self.hostname,
             'connectFailure' : self.connectFailure,
             'debug' : self.debug,
-            'installed' : installed,
         }
 
     @staticmethod
@@ -68,11 +52,6 @@ class Server(Entity):
             server.connectFailure = state['connectFailure']
         if state['debug'] != server.debug:
             server.debug = state['debug']
-        if 'installed' in state:
-            for av,configs in state['installed'].items():
-                app, version = App(av[0]), av[1]
-                av = AppVersion(app,version)
-                server.installed[av] = set( ConfigPackage(*cp) for cp in configs )
         return server
 
     @staticmethod
@@ -321,7 +300,6 @@ class DroneServer(Entity):
 
 
 # These come after our class definitions to avoid circular import dependencies
-from droned.models.app import App, AppVersion, AppInstance
 from droned.models.droneserver import DroneD
 from droned.management.server import ServerManager
 #exportable interface of the server

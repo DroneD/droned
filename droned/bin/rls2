@@ -1,0 +1,158 @@
+#!/usr/bin/python
+###############################################################################
+#   Copyright 2012 DroneD Project
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+###############################################################################
+try:
+    from twisted.internet import epollreactor
+    epollreactor.install()
+except: pass
+import sys
+from twisted.internet import reactor, defer
+from twisted.python import usage, util, failure
+from twisted.web.client import getPage
+internal_seperator = '/'
+RLS_VERSION = '1.9.0'
+DEBUG = False
+
+__author__ = 'Justin Venus <justin.venus@gmail.com>'
+__doc__ = """
+The romeo list utility version 2 searches a droned's config service as
+opposed to using romeo directly."""
+
+class Options(usage.Options, object):
+    optFlags = [
+        ["nonewline","n","Do not output the trailing newline."]
+    ]
+    args = property(lambda s: s._rls_args)
+    path = property(lambda s: s._rls_path)
+    tokens = property(lambda s: s.path.split(internal_seperator))
+    def __init__(self):
+        usage.Options.__init__(self)
+        self._rls_path = internal_seperator
+        self._rls_args = {}
+        self._rls_datadir = None
+        self._rls_values = False
+        self._host = '127.0.0.1'
+        self._port = 5500
+        self.parseOptions()
+
+    def opt_config(self, datadir=None):
+        """Load romeo config from this location. [default: builtin]"""
+        self._rls_datadir = datadir
+
+    def opt_host(self, host):
+        """Search this host. [default: localhost]"""
+        self._host = host
+
+    def opt_port(self, port):
+        """Connect to this port. [default: 5500]"""
+        self._port = usage.portCoerce(port)
+
+    def opt_version(self):
+        'Display version and exit.'
+        util.println('rls2 %s' % (RLS_VERSION,))
+        sys.exit(0)
+
+    def opt_delimiter(self, delim):
+        'Output will be seperated by this delimiter. [default: \\n]'
+        self._rls_args.update({'delimiter': [delim]})
+
+    def opt_yaml(self):
+        'Output format in YAML.'
+        self._rls_args.update({'format': ['yaml']})
+
+    def opt_json(self):
+        'Output format in Json.'
+        self._rls_args.update({'format': ['json']})
+
+    def opt_pickle(self):
+        'Output format in Pickle.'
+        self._rls_args.update({'format': ['pickle']})
+
+    def opt_values(self):
+        """Attempt to extract simple values from output. Use this option in 
+         conjunction with the delimiter option."""
+        self._rls_values = True
+
+    def opt_debug(self):
+        'Enable python stacktraces to stderr'
+        global DEBUG
+        DEBUG = True
+
+    def parseArgs(self, path=internal_seperator):
+        """We extract the RLS path which should be the last argument."""
+        if not path.startswith(internal_seperator):
+            path = internal_seperator + path
+        self._rls_path = path
+
+    def postOptions(self):
+        """we will apply the values option to the format at this stage."""
+        if self._rls_values:
+            formatOpts = self._rls_args.get('format', []) + ['values']
+            self._rls_args.update({'format': formatOpts})
+
+    @defer.inlineCallbacks
+    def __call__(self):
+        url = 'http://%s:%d/config%s' % (self._host,self._port,self.path)
+        args = []
+        for key in self.args.keys():
+            args += ["%s=%s" % (key, data) for data in self.args[key]]
+        if args:
+            url += '?' + '&'.join(args)
+        try:
+            self['RESULT'] = yield getPage(url)
+        except:
+            self['RESULT'] = failure.Failure()
+
+    @property
+    def result(self):
+        return self.get('RESULT','')
+
+def debug(msg):
+    if isinstance(msg, failure.Failure):
+        msg = msg.getErrorMessage()
+    sys.stderr.write(str(msg)+'\n')
+
+if __name__ == '__main__':
+    try:
+        request = Options()
+        if DEBUG:
+            debug("Path: %s" % request.path) 
+            debug("ARGS: %s\n" % str(request.args))
+        d = request()
+        d.addErrback(debug)
+        d.addBoth(lambda x: reactor.stop())
+        reactor.run()
+        if isinstance(request.result, failure.Failure):
+            request.result.raiseException()
+        if not request.get('nonewline'):
+            util.println(request.result)
+        else:
+            sys.stdout.write(request.result)
+            sys.stdout.flush()
+    except usage.UsageError:
+        util.println('%s: %s' % (sys.argv[0], failure.Failure().getErrorMessage()))
+        util.println('%s: Try --help for usage details.' % (sys.argv[0]))
+        sys.exit(1)
+    except SystemExit: pass
+    except:
+        f = failure.Failure()
+        code = 1
+        if hasattr(f.value, 'errno'):
+            code = f.value.errno
+        util.println('%s: %s' % (sys.argv[0], f.getErrorMessage()))
+        if DEBUG:
+            f.printDetailedTraceback(file=sys.stderr)
+        sys.exit(code)

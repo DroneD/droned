@@ -97,4 +97,4 @@ known_events = (
   'new-release-version',
   'release-change',
 )
-map(Event, known_events)
+list(map(Event, known_events))

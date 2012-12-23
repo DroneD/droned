@@ -51,7 +51,7 @@ def loadAll():
                     (modname,))
             continue #skip further checks
 
-        if not mod: continue #fix for sphinx documentation
+        if not bool(mod): continue #fix for sphinx documentation
         #prefer module level interfaces first and foremost
         try:
             if IDroneDService.providedBy(mod):
@@ -88,14 +88,14 @@ def loadAll():
 
 def getService(name):
     """Get the Service Objects"""
-    global EXPORTED_SERVICES
-    if name not in EXPORTED_SERVICES:
+    import services
+    if name not in services.EXPORTED_SERVICES:
         from droned.errors import ServiceNotAvailable
         raise ServiceNotAvailable(name)
-    return EXPORTED_SERVICES[name]
+    return services.EXPORTED_SERVICES[name]
 
 
 def listServices():
     """list the services by name that DroneD is providing"""
-    global EXPORTED_SERVICES
-    return EXPORTED_SERVICES.keys()
+    import services
+    return services.EXPORTED_SERVICES.keys()
