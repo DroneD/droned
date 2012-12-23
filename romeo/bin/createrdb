@@ -52,3 +52,6 @@ if cached == 1:
 
 println('Indexed %d environment%s' % (cached, suffix))
 cache.close()
+try: #do not cache empty environments.
+    if not cached and os.path.exists(cachedb): os.remove(cachedb)
+except: pass
