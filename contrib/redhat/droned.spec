@@ -158,16 +158,11 @@ homedir = /var/lib/droned
 journal = /var/lib/droned/journal
 hostdb = /etc/hostdb
 rsadir = /etc/pki/droned
-logdir = /var/log/droned
 primefile = /usr/share/droned/primes
 privatekey = local
 concurrency =  5
-umask = 0
-maxfd = 1024
 uid = nobody
 gid = nobody
-wait = 10
-deadline = 30
 EOF_CONF
 
 

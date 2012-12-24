@@ -2,17 +2,12 @@
 import sys
 import os
 
-try: #we should have epollreactor
-    from twisted.internet import epollreactor
-    epollreactor.install()
-except: pass
-
 try:
     import cPickle as pickle
 except:
     import pickle
 
-from twisted.internet import reactor, defer, protocol, task, endpoints
+from twisted.internet import defer, protocol, task, endpoints
 from twisted.application import internet, service
 from twisted.protocols import amp
 from twisted.python import util, failure
@@ -37,6 +32,7 @@ import copyright
 
 from kitt.decorators import debugCall
 log = lambda message: sys.stdout.write(str(message)+'\n')
+tracker = None
 
 ###############################################################################
 # Command Invocation Support
@@ -109,8 +105,10 @@ class DefaultProtocol(protocol.ProcessProtocol):
             self.transport.closeStdin()
         self._pid = self.transport.pid
         self._process = process.Process(self.transport.pid)   
-        if not self._Silence:
-            MessageTracking.started(self._pid)
+        if self._Silence: return
+        #scan process table
+        tracker.scheduler()
+        MessageTracking.started(self._pid)
 
     def outReceived(self, data):
         if not self._Silence:
@@ -135,8 +133,28 @@ class DefaultProtocol(protocol.ProcessProtocol):
         setattr(reason.value, 'stderr', self._errbuf)
         if not self.deferredResult.called:
             self.deferredResult.errback(reason)
-        if not self._Silence:
-            MessageTracking.exited(self._pid, reason.value.exitCode)
+        if self._Silence: return
+        #scan process table
+        tracker.scheduler()
+        MessageTracking.exited(self._pid, reason.value.exitCode)
+
+
+class DroneProtocol(DefaultProtocol):
+    """this is only used if we don't have systemd"""
+    def __init__(self, *args, **kwargs):
+        DefaultProtocol.__init__(self, *args, **kwargs)
+        config.reactor.addSystemEventTrigger(
+            'before', 'shutdown', self._die)
+
+    def _die(self):
+        if self.transport.pid:
+            os.kill(self.transport.pid, 15)
+
+    def outReceived(self, data):
+        sys.stdout.write(data)
+
+    def errReceived(self, data):
+        sys.stderr.write(data)
 
 
 def command(executable, args, **kwargs):
@@ -169,7 +187,7 @@ def command(executable, args, **kwargs):
     args = tuple(newargs)
 
     #setup the client application to run
-    app = ClientCreator(reactor, proto, *proto_args, **kwargs)
+    app = ClientCreator(config.reactor, proto, *proto_args, **kwargs)
     deferredSpawn = app.spawn(
         executable, args, env, path, usePTY, childFDS, uid, gid)
 
@@ -329,7 +347,8 @@ class ProcessTracking(Entity):
         self._connections = set()
         self._process_cache = {}
         self._deferred = defer.succeed({})
-        self._task = task.LoopingCall(self._scheduler)
+        self._task = task.LoopingCall(self.scheduler)
+        self._pids = set()
 
     def add(self, addr):
         """add tracked connection"""
@@ -344,21 +363,30 @@ class ProcessTracking(Entity):
             if self._task.running:
                 self._task.stop()
 
-    def _scheduler(self):
+    def scheduler(self):
         if self._deferred.called:
-            if self._connections:
+            if config.DEBUG_EVENTS:
                 log('Scanning Process Table.')
-                self._deferred = self._process_scanner({})
-                self._deferred.addCallback(self._updateState)
-                self._deferred.addErrback(lambda x: {})
-            else:
-                self._deferred = defer.succeed({})
+            self._deferred = self._process_scanner({})
+            self._deferred.addCallback(self._updateState)
+            self._deferred.addErrback(lambda x: {})
         return self._deferred
 
+    @defer.inlineCallbacks
     def _updateState(self, resultDict):
         self._process_cache = resultDict
-        log('Process Table Scan Completed.')
-        return resultDict
+        if config.DEBUG_EVENTS:
+            log('Process Table Scan Completed.')
+        newset = set(resultDict.keys())
+        nochange = self._pids & newset
+        lost = nochange ^ self._pids
+        found = nochange ^ newset
+        #notify droned that we found new processes
+        yield defer.DeferredList(map(MessageTracking.started,found), consumeErrors=True)
+        #notify droned that we lost processes
+        yield defer.DeferredList(map(MessageTracking.lost, lost), consumeErrors=True)
+        self._pids = newset
+        defer.returnValue(resultDict)
 
     @process.threaded
     def _process_scanner(self, results):
@@ -401,6 +429,23 @@ class MessageTracking(Entity):
             return defer.DeferredList(results, consumeErrors=True)
         return defer.succeed(None)
 
+    def lost(self, pid):
+        results = []
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessLost,pid=pid)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
+
+    def stdout(self, pid, data):
+        results = []
+        for c in self._connections:
+            d = c.callRemote(ampcommands.ProcessStdout,pid=pid,data=data)
+            results.append(d)
+        if results:
+            return defer.DeferredList(results, consumeErrors=True)
+        return defer.succeed(None)
     def stdout(self, pid, data):
         results = []
         for c in self._connections:
@@ -472,7 +517,7 @@ class AMPProtocol(amp.AMP):
         status = result.value.status or 0
         return {
             'code': exitCode, 
-            'description': description,
+            'description': description.strip(),
             'status': status,
             'signal': str(sig)
         }
@@ -491,7 +536,7 @@ class SystemService(Entity):
     """Encapsulate Services."""
     def __init__(self, name):
         self.name = name
-        self.data = {}
+        self.data = {'Names': name}
 
     def __getstate__(self):
         return {
@@ -511,7 +556,7 @@ class SystemService(Entity):
     def value(self, key):
         """Get systemd value by key"""
         return {
-            'description': str(self.data.get(key, None)),
+            'description': str(self.data.get(key, None)).strip(),
             'code': 0,
             'status': 0,
             'signal': '0'
@@ -552,8 +597,19 @@ class SystemService(Entity):
         result['description'] = result.pop('stdout')
         for line in result['description'].split('\n'):
             if not line: continue
-            data = line.split('=',1)
-            self.data[data[0]] = data[1]
+            if config.system.systemd:
+                data = line.split('=',1)
+                self.data[data[0]] = data[1]
+                continue
+            m = config.system.show_regex.search(line)
+            if not m: continue
+            for var, val in m.groupdict().items():
+                if not val:
+                    self.data.pop(var, None)
+                    continue
+                self.data[var.replace('2','')] = val
+        if not config.system.systemd:
+            result['description'] = '\n'.join("%s=%s" % (var,str(val)) for var, val in self.data.items())
         defer.returnValue(result)
 
     @defer.inlineCallbacks
@@ -584,7 +640,7 @@ class SystemService(Entity):
         """show status."""
         result = yield self(config.system.status(self.name))
         result.pop('stderr')
-        result['description'] = result.pop('stdout')
+        result['description'] = result.pop('stdout').strip()
         yield self.show()
         defer.returnValue(result)
 
@@ -622,11 +678,34 @@ class SystemManager(Entity):
         log("Checking for Service Information.")
         for line in reason.value.stdout.split('\n'):
             if not line: continue
+            line = line.replace('\t',' ')
             try:
                 yield SystemService(line.split(' ')[0]).show()
             except: pass
         log("Finished Checking System.")
 
+
+class Drone(service.Service):
+    """This is only used if we don't have systemd"""
+    comm = os.path.join(DIRECTORY,'drone')
+    args = sys.argv[1:]
+    deferred = defer.succeed(None)
+
+    @defer.inlineCallbacks
+    def run(self):
+        while self.running:
+            try: #make sure drone command process stays running.
+                yield command(self.comm, self.args, protocol=DroneProtocol)
+            except: pass
+
+    def startService(self):
+        if self.running: return
+        service.Service.startService(self)
+        self.deferred = self.run()
+
+    def stopService(self):
+        service.Service.stopService(self)
+        return self.deferred 
 
 ###############################################################################
 # Main Setup
@@ -634,10 +713,43 @@ class SystemManager(Entity):
 def main():
     import config
     globals()['config'] = config
+    from kitt.daemon import owndir
 
-    import droned.logging
-    droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
+    #take ownership of droned's directories.
+    for var, val in config.items():
+        if not str(val).startswith(os.path.sep): continue
+        if not str(var).endswith('DIR'): continue
+        owndir(config.DRONED_USER, val)
 
+    #use syslog facility to manage the logs
+    if not config.system.systemd and not config.DEBUG_EVENTS:
+        pid = os.fork() #first fork
+        if pid > 0: sys.exit(0)
+        os.chdir(os.path.sep)
+        os.setsid()
+        os.umask(0)
+        pid = os.fork() #double fork
+        if pid > 0: sys.exit(0)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        si = open('/dev/null', 'r')
+        so = open('/dev/null', 'a+')
+        se = open('/dev/null', 'a+')
+        os.dup2(si.fileno(), sys.stdin.fileno())
+        os.dup2(so.fileno(), sys.stdout.fileno())
+        os.dup2(se.fileno(), sys.stderr.fileno())
+        #setup logger
+        pid = str(os.getpid())
+        from twisted.python import syslog
+        syslog.startLogging(prefix='droned[%s]' % (pid,))
+        pidfile = os.environ.get(
+            'PIDFILE', os.path.join(config.DRONED_HOMEDIR, 'droned.pid'))
+        pidfile = open(pidfile, 'w')
+        pidfile.write(pid)
+        pidfile.close()
+    elif config.system.systemd: #systemd will manage this for us
+        import droned.logging
+        droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
     import grp
     import pwd
     # Get the uid/gid from the name
@@ -645,30 +757,36 @@ def main():
     config.running_gid = grp.getgrnam(config.DRONED_GROUP).gr_gid
 
     application = service.Application('droned')
-    reactor.callWhenRunning(
+    if not config.system.systemd: #supervise our command processor
+        service.IServiceCollection(application).addService(Drone())
+    config.reactor.callWhenRunning(
         service.IService(application).startService
     )
 
-    tracker = ProcessTracking(60.0)
+    tracker = globals()['tracker'] = ProcessTracking(60.0)
     NotifyingPBServerFactory.allConnections = tracker
     fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
-    server = endpoints.serverFromString(reactor, fixserver)
-    reactor.callWhenRunning(
+    server = endpoints.serverFromString(config.reactor, fixserver)
+    config.reactor.callWhenRunning(
         server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
     
     fixserver = config.DRONED_COMMAND_ENDPOINT.replace('path=','')
-    s = endpoints.serverFromString(reactor, fixserver)
-    reactor.callWhenRunning(s.listen, AMPServerFactory())
-    reactor.callWhenRunning(SystemManager)
+    s = endpoints.serverFromString(config.reactor, fixserver)
+    config.reactor.callWhenRunning(s.listen, AMPServerFactory())
+    config.reactor.callWhenRunning(SystemManager)
     #warm up the process cache.
-    reactor.callWhenRunning(tracker._scheduler)
+    config.reactor.callWhenRunning(tracker.scheduler)
     #watch dog setup
-    reactor.addSystemEventTrigger('before', 'shutdown',
+    config.reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService
     )
     log("Entering Event Loop.")
-    reactor.run()
+    config.reactor.run()
     log('Droned Exiting.')
+    #post clean up.
+    pidfile = os.environ.get(
+        'PIDFILE', os.path.join(config.DRONED_HOMEDIR, 'droned.pid'))
+    if os.path.exists(pidfile): os.remove(pidfile)
     sys.exit(0)
 
 if __name__ == '__main__': main()

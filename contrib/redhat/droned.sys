@@ -9,4 +9,4 @@
 OPTIONS="--config=/etc/droned/droned.conf"
 
 #location of the launcher
-COMMAND=/usr/bin/droned
+COMMAND=/usr/share/droned/droned

@@ -64,26 +64,11 @@ if os.path.exists('setup.cfg'):
             ),
     }
 
-    _droned = {
-        'executable': sys.executable,
-        'script': os.path.join(
-                _config.get('install','install-lib'),
-                'droned-daemon.py'
-            ),
-    }
-
     #write the blaster wrapper
     blaster = open(os.path.join('bin','droneblaster'), 'w')
     blaster.write("""#!/bin/sh\nexec %(executable)s %(script)s "$@"\n""" % \
             _blaster)
     blaster.close()
-
-    #write the daemon wrapper
-    droned = open(os.path.join('bin','droned'), 'w')
-    droned.write("""#!/bin/sh\nexec %(executable)s %(script)s "$@"\n""" % \
-            _droned)
-    droned.close()
-
 
 from distutils.core import setup
 setup_kwargs = dict()

@@ -27,7 +27,7 @@ See the file "NEWS".
 What is DroneD?
 ---------------
 
-DroneD is a service container geared towards application management and monitoring. It provides a rich API for implementing services and messaging interfaces. It is built on the Twisted framework, and utilizes the BlasterProtocol  and/or XMPP for network communication. DroneD is currently used as the management framework for all components of the Orbitz Flight Search Farms.
+DroneD is a service container geared towards application management and monitoring. It provides a rich API for implementing services and messaging interfaces. It is built on the Twisted framework, and utilizes the BlasterProtocol for network communication. DroneD is currently used as the management framework for all components of the Orbitz Flight Search Farms.
 
 
 Service-Oriented Architecture
@@ -47,9 +47,12 @@ Originally DroneD was developed to manage the Orbitz Flight Search farms. Howeve
 Development
 -----------
 
-DroneD is developed and maintained by Orbitz Worldwide an Industry Leading Online Travel Agency. The code lives in our git repository at https://github.com/OrbitzWorldwide/droned
+DroneD requires the following components.
 
-If you are interested in developing a DroneD system, please consult the SOS development team.
+python2.5+ 
+twisted 8.2.0+ (You will need twisted.internet.endpoints from twisted 10.1+)
+python-psutil
+PyYAML
 
 
 Maintainers

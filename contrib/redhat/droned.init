@@ -29,10 +29,12 @@ pidfile=${PIDFILE-/var/run/${prog}.pid}
 lockfile=${LOCKFILE-/var/lock/subsys/${prog}}
 RETVAL=0
 
+PIDFILE=${pidfile}
+export PIDFILE
 
 start() {
         echo -n $"Starting $prog: "
-	$COMMAND $OPTIONS --pidfile=${pidfile} >&/dev/null
+	$COMMAND $OPTIONS >&/dev/null
         RETVAL=$?
         #should not have to do this
         if [ $RETVAL -eq 0 ]; then
@@ -47,8 +49,9 @@ start() {
 
 stop() {
         echo -n $"Stopping $prog: "
-        $COMMAND $OPTIONS --pidfile=${pidfile} --stop >&/dev/null
+        kill `cat ${pidfile} 2>/dev/null` >&/dev/null
         RETVAL=$?
+        while [ -e ${pidfile} ]; do sleep 1; done
         #should not have to do this
         if [ $RETVAL -eq 0 ]; then
                 echo_success
@@ -56,7 +59,7 @@ stop() {
                 echo_failure
         fi
         echo
-	[ $RETVAL = 0 ] && rm -f ${lockfile} ${pidfile}
+	[ $RETVAL = 0 ] && rm -f ${lockfile}
 }
 
 # See how we were called.

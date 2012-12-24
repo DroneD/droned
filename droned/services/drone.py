@@ -348,6 +348,9 @@ def install(_parentService):
     for var, val in SERVICECONFIG.wrapped.items():
         setattr(config, var, val)
     parentService = _parentService
+    if SERVICENAME in config.AUTOSTART_SERVICES:
+        from kitt.daemon import owndir
+        owndir(config.DRONED_USER, config.DRONED_WEBROOT)
 
 def start():
     global service

@@ -4,6 +4,10 @@ class ProcessStarted(protocols.amp.Command):
     arguments = [('pid', protocols.amp.Integer()),]
     response = []
 
+class ProcessLost(protocols.amp.Command):
+    arguments = [('pid', protocols.amp.Integer()),]
+    response = []
+
 class ProcessStdout(protocols.amp.Command):
     arguments = [('pid', protocols.amp.Integer()),
                  ('data', protocols.amp.String())]

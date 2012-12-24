@@ -35,12 +35,6 @@ sys.path.insert(0, DIRECTORY)
 sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
 
 try:
-    from twisted.internet import epollreactor
-    epollreactor.install()
-except: pass
-from twisted.internet import reactor
-
-try:
     import cPickle as pickle
 except:
     import pickle
@@ -67,7 +61,7 @@ class Daemon(object):
             #suppress further signals
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             self.log('Received SIGTERM Shutting Down in 5 seconds')
-            reactor.callLater(5.0, reactor.stop)
+            config.reactor.callLater(5.0, config.reactor.stop)
         #imported below in this file
         Event('signal').fire(
             signum=signum,
@@ -83,7 +77,7 @@ class Daemon(object):
         """drop privileges, and terminate the parent process"""
         if os.getuid() != 0:
             # We're not root so, like, whatever dude
-            reactor.fireSystemEvent('priviledges')
+            config.reactor.fireSystemEvent('priviledges')
             return
 
         import grp
@@ -100,12 +94,12 @@ class Daemon(object):
         os.setgid(running_gid)
         os.setuid(running_uid)
         # let services know it is ok to start
-        reactor.fireSystemEvent('priviledges')
+        config.reactor.fireSystemEvent('priviledges')
         #prevent this from being called ever again
         self.drop_privileges = lambda: None
 
     def __call__(self, *args, **kwargs):
-        reactor.callWhenRunning(self.drop_privileges)
+        config.reactor.callWhenRunning(self.drop_privileges)
         return 0
 
     def suppress_signals(self):
@@ -124,6 +118,7 @@ class Daemon(object):
 ###############################################################################
 try:
     import config
+    globals()['config'] = config
     drone = Daemon()
     drone() #lets daemonize (assuming !nodaemon) and get going
 except SystemExit: raise
@@ -137,8 +132,7 @@ except:
     sys.exit(1)
 
 #compatibility
-config.reactor = reactor
-reactor.callWhenRunning(drone.log, "DroneD reactor is now running.")
+config.reactor.callWhenRunning(drone.log, "DroneD reactor is now running.")
 
 import droned.logging
 droned.logging.logToStdout(timestamp=config.DEBUG_EVENTS)
@@ -345,7 +339,7 @@ import services #provided by ServiceManager
 #this lets you have temporary root level permision prior to your
 #service actually starting, you should check to see if your service
 #is in config.AUTOSTART_SERVICES.
-reactor.fireSystemEvent('droned-configured')
+config.reactor.fireSystemEvent('droned-configured')
 
 ###############################################################################
 # Setup Log Handlers
@@ -370,6 +364,11 @@ class Commands(amp.AMP):
         Event('process-started').fire(pid=pid)
         return {}
     ampcommands.ProcessStarted.responder(processStarted)
+
+    def processLost(self, pid):
+        Event('process-lost').fire(pid=pid)
+        return {}
+    ampcommands.ProcessLost.responder(processLost)
 
     def processStdout(self, pid, data):
         Event('process-stdout').fire(pid=pid, data=data)
@@ -407,8 +406,8 @@ class Commands(amp.AMP):
         return {}
     ampcommands.SystemSettings.responder(systemdState)
 
-
-class Command(Entity):
+#make this class hidden from the list command.
+class Command(config.ROMEO_API.entity.Entity):
     def __init__(self):
         import droned.clients
         droned.clients.command = self.command
@@ -444,10 +443,9 @@ class CommandFactory(protocol.ClientFactory):
 from droned.clients import endpoint
 #setup the command/control interface to the master process.
 fixclient = config.DRONED_COMMAND_ENDPOINT.split(':mode=')[0]
-cClient = endpoint.reconnectingClientFromString(reactor, fixclient)
+cClient = endpoint.reconnectingClientFromString(config.reactor, fixclient)
 #gives the privledged server component a moment to start.
-reactor.callLater(5.0, cClient.connect, CommandFactory())
-
+config.reactor.callLater(5.0, cClient.connect, CommandFactory())
 
 ###############################################################################
 # Twisted Application Container Setup
@@ -457,17 +455,17 @@ reactor.callLater(5.0, cClient.connect, CommandFactory())
 application = service.Application("droned")
 
 #make sure the top level service container is ready to go
-reactor.callWhenRunning(
+config.reactor.callWhenRunning(
     service.IService(application).startService
 )
 #install and start services after privledges drop
-reactor.addSystemEventTrigger('after', 'priviledges', 
+config.reactor.addSystemEventTrigger('after', 'priviledges', 
     sm._installServices, application
 )
 #make sure our services properly terminate
-reactor.addSystemEventTrigger('before', 'shutdown', sm._stopAll)
+config.reactor.addSystemEventTrigger('before', 'shutdown', sm._stopAll)
 #make twisted services properly terminate
-reactor.addSystemEventTrigger('before', 'shutdown',
+config.reactor.addSystemEventTrigger('before', 'shutdown',
     service.IService(application).stopService
 )
 
@@ -476,9 +474,9 @@ reactor.addSystemEventTrigger('before', 'shutdown',
 ###############################################################################
 
 #the signal handler must be installed after the reactor is running!!!
-reactor.callWhenRunning(drone.suppress_signals)
-#last step, turn the reactor loose
+config.reactor.callWhenRunning(drone.suppress_signals)
+#last step, turn the config.reactor loose
 drone.log('DroneD is starting the reactor.')
-reactor.run()
+config.reactor.run()
 drone.log('DroneD is now Exiting.')
 sys.exit(0) #done now, let's do this again sometime
