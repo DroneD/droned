@@ -14,13 +14,24 @@
 #   limitations under the License.
 ###############################################################################
 
+import platform
+_name = platform.system().lower()
+if _name == 'linux':
+    try: #we should have epollreactor
+        from twisted.internet import epollreactor
+        epollreactor.install()
+    except: pass
+#todo finish filling the reactors out
+
+from twisted.internet import reactor
+
 from twisted.python import usage, util
 import copyright
 import romeo
 import copy
 import sys
 import os
-
+import re
 
 try:
     from kitt import rsa
@@ -104,6 +115,8 @@ class SystemAgent(object):
         if not self.systemd:
             self._agent_cmd = self._agent('service')
             self._chkconfig = self._agent('chkconfig')
+            #/sbin/service compatible regex on Centos6.
+            self.show_regex = re.compile("(?P<Id>\S+)\s+\(pid\s+(?P<MainPID>[0-9]+)\)\s+is\s+(?P<SubState>[a-zA-Z]+).*|(?P<Id2>\S+)\s+is\s+(?P<SubState2>[a-zA-Z]+).*")
 
     @staticmethod
     def _agent(x):
@@ -174,11 +187,10 @@ class ConfigManager(romeo.entity.Entity):
         util.println('Configuration is loaded.')
         sys.modules['config'] = self
         #automatically subscribe to the watchdog
-        from twisted.internet import reactor
         from kitt.daemon import WatchDog
         watchdog = WatchDog()
-        reactor.callWhenRunning(watchdog.start)
-        reactor.addSystemEventTrigger('during', 'shutdown', watchdog.stop)
+        self.reactor.callWhenRunning(watchdog.start)
+        self.reactor.addSystemEventTrigger('during', 'shutdown', watchdog.stop)
 
     def configure(self):
         """load configuration for the rest of us."""
@@ -230,7 +242,7 @@ class ConfigManager(romeo.entity.Entity):
 
         self.data = {
             'system': SystemAgent(),
-#            'reactor': drone.reactor,
+            'reactor': reactor,
             'AUTOSTART_SERVICES': AUTOSTART_SERVICES,
             'EXCESSIVE_LOGGING': self.drone.debug,
             'ROMEO_API': romeo,
