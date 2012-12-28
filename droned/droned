@@ -207,6 +207,8 @@ SERVICE = None
 
 def extractData(func):
     def extract(result):
+        if isinstance(result, (int,str,float,bool)):
+            return result
         if isinstance(result, list):
             newList = []
             for item in result:
@@ -219,7 +221,9 @@ def extractData(func):
             return newDict
         if hasattr(result, '__dict__'):
             return dict(result.__dict__)
-        return result
+        if hasattr(result, '_asdict'):
+            return dict(result._asdict())
+        return result #good luck
     def extractFailure(reason):
         return failure.Failure(
             pb.RemoteError(reason.type, reason.value, reason.printTraceback))
@@ -365,6 +369,8 @@ class ProcessTracking(Entity):
 
     def scheduler(self):
         if self._deferred.called:
+            if not self._connections:
+                return defer.succeed(self._process_cache)
             if config.DEBUG_EVENTS:
                 log('Scanning Process Table.')
             self._deferred = self._process_scanner({})
@@ -610,6 +616,7 @@ class SystemService(Entity):
                 self.data[var.replace('2','')] = val
         if not config.system.systemd:
             result['description'] = '\n'.join("%s=%s" % (var,str(val)) for var, val in self.data.items())
+        tracker.scheduler()
         defer.returnValue(result)
 
     @defer.inlineCallbacks
@@ -775,7 +782,7 @@ def main():
     config.reactor.callWhenRunning(s.listen, AMPServerFactory())
     config.reactor.callWhenRunning(SystemManager)
     #warm up the process cache.
-    config.reactor.callWhenRunning(tracker.scheduler)
+#    config.reactor.callWhenRunning(tracker.scheduler)
     #watch dog setup
     config.reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService

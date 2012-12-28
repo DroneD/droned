@@ -34,14 +34,6 @@ sys.path.insert(0, DIRECTORY)
 #setup our library path based on where we came from
 sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
 
-try:
-    import cPickle as pickle
-except:
-    import pickle
-
-###############################################################################
-# Command line parser.
-###############################################################################
 class Daemon(object):
     SIGNALS = dict((k, v) for v, k in signal.__dict__.iteritems() if \
         v.startswith('SIG') and not v.startswith('SIG_'))
@@ -355,97 +347,6 @@ droned.events.loadAll()
 
 #import event prior to installing services
 from droned.models.event import Event
-
-from droned.protocols import ampcommands
-from twisted.protocols import amp
-
-class Commands(amp.AMP):
-    def processStarted(self, pid):
-        Event('process-started').fire(pid=pid)
-        return {}
-    ampcommands.ProcessStarted.responder(processStarted)
-
-    def processLost(self, pid):
-        Event('process-lost').fire(pid=pid)
-        return {}
-    ampcommands.ProcessLost.responder(processLost)
-
-    def processStdout(self, pid, data):
-        Event('process-stdout').fire(pid=pid, data=data)
-        return {}
-    ampcommands.ProcessStdout.responder(processStdout)
-
-    def processStderr(self, pid, data):
-        Event('process-stderr').fire(pid=pid, data=data)
-        return {}
-    ampcommands.ProcessStderr.responder(processStderr)
-
-    def processExited(self, pid, exitCode):
-        Event('process-exited').fire(pid=pid, exitCode=exitCode)
-        return {}
-    ampcommands.ProcessExited.responder(processExited)
-
-    def systemdState(self, state):
-        from droned.models.action import AdminAction
-        systemd = pickle.loads(state)
-        name = systemd['name'].replace('.service','')
-        keys = config.APPLICATIONS.keys() + config.SERVICES.keys()
-        run = any([x in [name, systemd['name']] for x in keys])
-        if not any([x in [name, systemd['name']] for x in keys]):
-            return {} #don't expose systemd services by default.
-        admin = AdminAction(name)
-        for var, val in systemd['methods'].items():
-            admin.unexpose(var)
-            admin.expose(
-                var,
-                Command().dispatch(systemd['name'], var),
-                val[0],
-                val[1]
-            )
-        admin.buildDoc()
-        return {}
-    ampcommands.SystemSettings.responder(systemdState)
-
-#make this class hidden from the list command.
-class Command(config.ROMEO_API.entity.Entity):
-    def __init__(self):
-        import droned.clients
-        droned.clients.command = self.command
-
-    def dispatch(self, service, action):
-        def comm(*args):
-            a = ''
-            if args:
-                a = ' '.join(list(args))
-            return self.instance.callRemote(
-                ampcommands.SystemCtrl, service=service, action=action, argstr=a)
-        return comm
-
-    def command(self, executable, *args, **kwargs):
-        if not args:
-            args = [[]]
-        options = {
-            'exec': executable,
-            'args': args,
-            'kwargs': kwargs
-        }
-        return self.instance.callRemote(
-            ampcommands.Command, pickledArguments=pickle.dumps(options))
-
-class CommandFactory(protocol.ClientFactory):
-    protocol = Commands
-    def buildProtocol(self, addr):
-        protocol = self.protocol()
-        protocol.factory = self
-        Command().instance = protocol
-        return protocol
-
-from droned.clients import endpoint
-#setup the command/control interface to the master process.
-fixclient = config.DRONED_COMMAND_ENDPOINT.split(':mode=')[0]
-cClient = endpoint.reconnectingClientFromString(config.reactor, fixclient)
-#gives the privledged server component a moment to start.
-config.reactor.callLater(5.0, cClient.connect, CommandFactory())
 
 ###############################################################################
 # Twisted Application Container Setup

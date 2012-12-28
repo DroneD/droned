@@ -2,7 +2,6 @@ from twisted.internet import defer
 from twisted.python import failure
 from twisted.spread import pb
 from droned.clients import endpoint
-from droned.entity import Entity
 import config
 
 _machine_methods = [
@@ -57,21 +56,30 @@ class _ReconnectingPBClientFactory(pb.PBClientFactory):
             proto.connectionLost = lost(proto.connectionLost)
         return proto
 
-
-class MachineConnector(Entity):
+#hide from list method
+class MachineConnector(config.ROMEO_API.entity.Entity):
     connected = property(lambda s: s._deferred.called and not s._error)
     machine = property(lambda s: getattr(s, '_object', s._error))
     error = property(lambda s: s._error)
 
-    def __init__(self, reactor, description):
+    def __del__(self):
+        self._x.stopTrying()
+
+    def __init__(self, description):
         self._error = None
         self._object = None
         self._deferred = defer.Deferred()
         _ReconnectingPBClientFactory.disconnected = self._onDisconnect
         _ReconnectingPBClientFactory.callback = self._onConnect
         _ReconnectingPBClientFactory.errback = self._onError
-        self._x = endpoint.reconnectingClientFromString(reactor, description)
+        self._x = endpoint.reconnectingClientFromString(config.reactor, description)
         self._x.connect(_ReconnectingPBClientFactory())
+
+    def retry(self):
+        return self._x.retry()
+
+    def disconnect(self):
+        return self._x.disconnect()
 
     def _onConnect(self, result):
         setattr(self, '_object', result)
@@ -115,7 +123,7 @@ class Process(object):
     def __init__(self, pid, machine=None):
         if not machine:
             fixclient = config.DRONED_PROCESS_ENDPOINT.split(':mode=')[0]
-            self._original = MachineConnector(config.reactor, fixclient)
+            self._original = MachineConnector(fixclient)
         else:
             self._original = machine
         self._pid = int(pid)

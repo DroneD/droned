@@ -30,9 +30,10 @@ SERVICECONFIG = dictwrapper({
 
 from twisted.python.failure import Failure
 from twisted.application import internet
+from twisted.application.service import MultiService
 from twisted.web import server, static, resource
 from twisted.web.error import NoResource
-from twisted.internet import defer, task
+from twisted.internet import defer, task, protocol
 import config
 import romeo
 
@@ -44,6 +45,11 @@ import time
 import gc
 
 from droned.protocols.blaster import DroneServerFactory
+from droned.models.event import Event
+from droned.models import process
+
+from droned.protocols import ampcommands
+from twisted.protocols import amp
 
 #setup some logging contexts
 http_log = logWithContext(type='http', route=SERVICENAME)
@@ -339,6 +345,125 @@ class DroneSite(server.Site):
        else: http_log(line)
 
 
+class Commands(amp.AMP):
+    """Command Dispatcher Protocol"""
+    def processStarted(self, pid):
+        Event('process-started').fire(pid=pid)
+        return {}
+    ampcommands.ProcessStarted.responder(processStarted)
+
+    def processLost(self, pid):
+        Event('process-lost').fire(pid=pid)
+        return {}
+    ampcommands.ProcessLost.responder(processLost)
+
+    def processStdout(self, pid, data):
+        Event('process-stdout').fire(pid=pid, data=data)
+        return {}
+    ampcommands.ProcessStdout.responder(processStdout)
+
+    def processStderr(self, pid, data):
+        Event('process-stderr').fire(pid=pid, data=data)
+        return {}
+    ampcommands.ProcessStderr.responder(processStderr)
+
+    def processExited(self, pid, exitCode):
+        Event('process-exited').fire(pid=pid, exitCode=exitCode)
+        return {}
+    ampcommands.ProcessExited.responder(processExited)
+
+    def systemState(self, state):
+        from droned.models.action import AdminAction
+        systemd = pickle.loads(state)
+        name = systemd['name'].replace('.service','')
+        keys = config.APPLICATIONS.keys() + config.SERVICES.keys()
+        if not any([x in [name, systemd['name']] for x in keys]):
+            return {} #don't expose systemd services by default.
+        admin = AdminAction(name)
+        for var, val in systemd['methods'].items():
+            admin.unexpose(var)
+            admin.expose(
+                var,
+                Command().dispatch(systemd['name'], var),
+                val[0],
+                val[1]
+            )
+        admin.buildDoc()
+        return {}
+    ampcommands.SystemSettings.responder(systemState)
+
+
+#make this class hidden from the list command.
+class Command(config.ROMEO_API.entity.Entity):
+    """Command Dispatcher Model"""
+    def __init__(self):
+        import droned.clients
+#FIXME this is a hack!!!
+        droned.clients.command = self.command
+
+    def dispatch(self, service, action):
+        def comm(*args):
+            a = ''
+            if args:
+                a = ' '.join(list(args))
+            return self.instance.callRemote(
+                ampcommands.SystemCtrl, service=service, action=action, argstr=a)
+        return comm
+
+    def command(self, executable, *args, **kwargs):
+        if not args:
+            args = [[]]
+        options = {
+            'exec': executable,
+            'args': args,
+            'kwargs': kwargs
+        }
+        return self.instance.callRemote(
+            ampcommands.Command, pickledArguments=pickle.dumps(options))
+Command() #wire up the command dispatcher prior to importing the endpoint
+from droned.clients import endpoint
+
+class CommandFactory(protocol.ClientFactory):
+    """Command Dispatcher Factory"""
+    protocol = Commands
+    def buildProtocol(self, addr):
+        protocol = self.protocol()
+        protocol.factory = self
+        Command().instance = protocol
+        return protocol
+
+
+class DroneManager(MultiService, object):
+    """Responsible for connecting to priviledged process"""
+    def __init__(self):
+        MultiService.__init__(self)
+
+    def startService(self):
+        Event('process-started').subscribe(self._addprocess)
+        Event('process-lost').subscribe(self._delprocess)
+        Event('process-exited').subscribe(self._delprocess)
+        fixclient = config.DRONED_COMMAND_ENDPOINT.split(':mode=')[0]
+        self.endpoint = endpoint.reconnectingClientFromString(config.reactor, fixclient)
+        self.endpoint.connect(CommandFactory())
+        # we typically loose messages that we want, and need to forcibly reconnect.
+        self._processes = {os.getpid(): process.Process(os.getpid())}
+        config.reactor.callLater(5.0, self.endpoint.disconnect)
+        return MultiService.startService(self)
+
+    def stopService(self):
+        Event('process-started').unsubscribe(self._addprocess)
+        Event('process-lost').unsubscribe(self._delprocess)
+        Event('process-exited').unsubscribe(self._delprocess)
+        self.endpoint.stopTrying()
+        self.endpoint.disconnect()
+        return MultiService.stopService(self)
+
+    def _delprocess(self, occurrence):
+        self._processes.pop(occurrence.pid, None)
+
+    def _addprocess(self, occurrence):
+        self._processes[occurrence.pid] = process.Process(occurrence.pid)
+
 ###############################################################################
 # Service API Requirements
 ###############################################################################
@@ -354,6 +479,7 @@ def install(_parentService):
 
 def start():
     global service
+    global parentService
     if not running():
         kwargs = {'timeout': 60 * 60 * 12, 'logPath': None}
         try: kwargs.update({'timeout': config.DRONED_SERVER_TIMEOUT})
@@ -365,8 +491,9 @@ def start():
 
         site = DroneSite(dr, **kwargs)
         factory = DroneServerFactory(server_log, text_factory=site)
-        #service = internet.TCPServer(config.DRONED_PORT, site) 
-        service = internet.TCPServer(config.DRONED_PORT, factory) 
+        xsrvc = internet.TCPServer(config.DRONED_PORT, factory) 
+        service = DroneManager()
+        service.addService(xsrvc)
         service.setName(SERVICENAME)
         service.setServiceParent(parentService)
 
