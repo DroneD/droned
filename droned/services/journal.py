@@ -145,17 +145,15 @@ class Journal(Service):
         Event('journal-error').subscribe(self._journal_failure)
         Event('instance-started').subscribe(self.write)
         Event('signal').subscribe(self.write)
-        Service.startService(self)
+        return Service.startService(self)
 
+    @defer.inlineCallbacks
     def stopService(self):
         Event('instance-started').unsubscribe(self.write)
         Event('signal').unsubscribe(self.write)
         Event('journal-error').unsubscribe(self._journal_failure)
+        yield self.writing
         if self._task.running: self._task.stop()
-        if not self.writing.called:
-            self.writing.addBoth(lambda x: Service.stopService(self) and x or x)
-            return self.writing #the main service will deal with it
-        Service.stopService(self)
 
 # module state globals
 parentService = None
