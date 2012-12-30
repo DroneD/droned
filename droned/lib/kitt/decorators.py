@@ -20,6 +20,12 @@ from kitt.util import getException
 import sys
 import time
 
+def deferred(func):
+    """This decorator wraps a method in a maybeDeferred"""
+    def newfunc(*args, **kwargs):
+        return defer.maybeDeferred(func, *args, **kwargs)
+    return newfunc
+
 
 def deferredAsThread(func):
     """This decorator wraps functions and returns deferred
@@ -53,11 +59,9 @@ def deferredInThreadPool(pool=None, R=None):
     """
     if not R:
         try:
-            import config
-            reactor = config.reactor
+            import config.reactor as R
         except:
-            from twisted.internet import reactor
-        R = reactor
+            import twisted.internet.reactor as R
     if not pool: #provide a default thread pool
         pool = R.getThreadPool()
     def decorator(func):

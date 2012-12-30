@@ -170,8 +170,10 @@ def install(_parentService):
     parentService = _parentService
     for var, val in SERVICECONFIG.wrapped.items():
         setattr(config, var, val)
-    #loading historic data must happen before any service starts
-    load() #load the historic journal
+
+#work around service race conditions.
+if SERVICENAME in config.AUTOSTART_SERVICES:
+    load() #load the historic journal, before anything else happens.
 
 def start():
     global service
