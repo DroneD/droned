@@ -80,3 +80,14 @@ def cancelTask(deferredResult):
     """As suggested this cancels our task"""
     if not deferredResult.called:
         defer.timeout(deferredResult)
+
+class _command(object):
+    def __init__(self):
+        import services
+        self._getService = services.getService
+
+    def __call__(self, executable, *args, **kwargs):
+        return self._getService('drone').command(executable, *args, **kwargs)
+command = _command()
+
+__all__ = ['connect', 'command', 'cancelTask']

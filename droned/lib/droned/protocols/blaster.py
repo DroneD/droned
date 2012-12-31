@@ -40,7 +40,57 @@ class SignatureException(Exception): pass
 class UnactionableException(Exception): pass
 class ClockSkewException(Exception): pass
 
+#
+# Inter - process - communication.
+#
+class ProcessStarted(amp.Command):
+    arguments = [('pid', amp.Integer()),]
+    response = []
 
+class ProcessLost(amp.Command):
+    arguments = [('pid', amp.Integer()),]
+    response = []
+
+class ProcessStdout(amp.Command):
+    arguments = [('pid', amp.Integer()),
+                 ('data', amp.String())]
+    response = []
+
+class ProcessStderr(amp.Command):
+    arguments = [('pid', amp.Integer()),
+                 ('data', amp.String())]
+    response = []
+
+class ProcessExited(amp.Command):
+    arguments = [('pid', amp.Integer()),
+                 ('exitCode', amp.Integer())]
+    response = []
+
+class SystemCtrl(amp.Command):
+    arguments = [('service', amp.String()),
+                 ('action', amp.String()),
+                 ('argstr', amp.String())]
+    response = [('code', amp.Integer()),
+                ('description', amp.String()),
+                ('signal', amp.String()),
+                ('status', amp.Integer())]
+
+class Command(amp.Command):
+    arguments = [
+        ('pickledArguments', amp.String())
+    ]
+    response = [('code', amp.Integer()),
+                ('description', amp.String()),
+                ('signal', amp.String()),
+                ('status', amp.Integer())]
+
+class SystemSettings(amp.Command):
+    arguments = [('state', amp.String()),]
+    response = []
+
+#
+# Blaster commands
+#
 class DroneCommand(amp.Command):
     """Executes a command"""
     arguments = [
@@ -86,7 +136,9 @@ class DronedServerAMP(amp.AMP):
         self._logger = kwargs.pop('logger', lambda x: None)
         amp.AMP.__init__(self, *args, **kwargs)
         from droned.models.server import drone
+        from droned.models.event import Event
         import config
+        self.Event = Event
         self._prime = 0
         self.config = config
         self._drone = drone
@@ -98,12 +150,49 @@ class DronedServerAMP(amp.AMP):
             self._drone.releasePrime(self._prime)
         return result
 
+    @ProcessStarted.responder
+    def processStarted(self, pid):
+        """fire a notification that we have a process"""
+        self.Event('process-started').fire(pid=pid)
+        return {}
+
+    @ProcessLost.responder
+    def processLost(self, pid):
+        """fire a notification that we have lost a process"""
+        self.Event('process-lost').fire(pid=pid)
+        return {}
+
+    @ProcessStdout.responder
+    def processStdout(self, pid, data):
+        """fire a notification that we have stdout from a process"""
+        self.Event('process-stdout').fire(pid=pid, data=data)
+        return {}
+
+    @ProcessStderr.responder
+    def processStderr(self, pid, data):
+        """fire a notification that we have stderr from a process"""
+        self.Event('process-stderr').fire(pid=pid, data=data)
+        return {}
+
+    @ProcessExited.responder
+    def processExited(self, pid, exitCode):
+        """fire a notification that we a process has exited"""
+        self.Event('process-exited').fire(pid=pid, exitCode=exitCode)
+        return {}
+
+    @SystemSettings.responder
+    def systemState(self, state):
+        """fire a notification that we have received system state info."""
+        self.Event('system-state').fire(connector=self, state=state)
+        return {}
+        
     @DronePrime.responder
     @defer.inlineCallbacks
     def getPrime(self):
         """get the prime initializer"""
         self._prime = yield self._drone.getprime()
         defer.returnValue({'prime': self._prime})
+
 
     @DroneCommand.responder
     @defer.inlineCallbacks

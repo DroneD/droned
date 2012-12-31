@@ -12,6 +12,7 @@ from twisted.application import internet, service
 from twisted.protocols import amp
 from twisted.python import util, failure
 from twisted.spread import pb
+import types
 import re
 
 #where did we come from?
@@ -27,7 +28,7 @@ from droned.entity import Entity
 from kitt.util import dictwrapper
 from kitt.decorators import synchronizedDeferred
 from droned.protocols.psproxy.apiwrapper import process
-from droned.protocols import ampcommands
+from droned.protocols.blaster import *
 import copyright
 
 from kitt.decorators import debugCall
@@ -429,7 +430,7 @@ class MessageTracking(Entity):
         try: process.Process(pid)
         except: pass
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessStarted,pid=pid)
+            d = c.callRemote(ProcessStarted,pid=pid)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -438,7 +439,7 @@ class MessageTracking(Entity):
     def lost(self, pid):
         results = []
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessLost,pid=pid)
+            d = c.callRemote(ProcessLost,pid=pid)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -447,7 +448,7 @@ class MessageTracking(Entity):
     def stdout(self, pid, data):
         results = []
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessStdout,pid=pid,data=data)
+            d = c.callRemote(ProcessStdout,pid=pid,data=data)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -455,7 +456,7 @@ class MessageTracking(Entity):
     def stdout(self, pid, data):
         results = []
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessStdout,pid=pid,data=data)
+            d = c.callRemote(ProcessStdout,pid=pid,data=data)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -464,7 +465,7 @@ class MessageTracking(Entity):
     def stderr(self, pid, data):
         results = []
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessStderr,pid=pid,data=data)
+            d = c.callRemote(ProcessStderr,pid=pid,data=data)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -476,7 +477,7 @@ class MessageTracking(Entity):
         if x: process.Process.delete(x)
         results = []
         for c in self._connections:
-            d = c.callRemote(ampcommands.ProcessExited,pid=pid,exitCode=exitCode)
+            d = c.callRemote(ProcessExited,pid=pid,exitCode=exitCode)
             results.append(d)
         if results:
             return defer.DeferredList(results, consumeErrors=True)
@@ -485,23 +486,25 @@ MessageTracking = MessageTracking()
 
 
 class AMPProtocol(amp.AMP):
+    notify = MessageTracking
     def connectionMade(self):
-        self.factory.notify.add(self)
-        for systemd in SystemService.objects:
+        self.notify.add(self)
+        for system in SystemService.objects:
             self.callRemote(
-                ampcommands.SystemSettings, state=pickle.dumps(systemd.__getstate__()))
+                SystemSettings, state=pickle.dumps(system.__getstate__()))
         return amp.AMP.connectionMade(self)
 
     def connectionLost(self, reason):
-        self.factory.notify.discard(self)
+        self.notify.discard(self)
         return amp.AMP.connectionLost(self, reason)
 
+    @SystemCtrl.responder
     def gov_systemctl(self, service, action, argstr):
         if argstr:
             return getattr(SystemService(service), action)(*argstr.split(' '))
         return getattr(SystemService(service), action)()
-    ampcommands.SystemCtrl.responder(gov_systemctl)
 
+    @Command.responder
     def gov_command(self, pickledArguments):
         options = pickle.loads(pickledArguments)
         if not 'uid' in options['kwargs']:
@@ -511,7 +514,6 @@ class AMPProtocol(amp.AMP):
         d = command(options['exec'], *options['args'], **options['kwargs'])
         d.addBoth(self._gov_processResult)
         return d
-    ampcommands.Command.responder(gov_command)
 
     def _gov_processResult(self, result):
         exitCode = result.value.exitCode
@@ -527,15 +529,6 @@ class AMPProtocol(amp.AMP):
             'status': status,
             'signal': str(sig)
         }
-
-
-class AMPServerFactory(protocol.ServerFactory):
-    protocol = AMPProtocol
-    notify = MessageTracking
-    def buildProtocol(self, addr):
-        protocol = self.protocol()
-        protocol.factory = self
-        return protocol
 
 
 class SystemService(Entity):
@@ -674,11 +667,13 @@ class SystemService(Entity):
         defer.returnValue(result)
             
 
-class SystemManager(Entity):
-    def __init__(self):
-        cmd, args = config.system.list()
-        d = command(cmd, args, bufferstd=True)
+class SystemManager(internet.TCPClient):
+    def __init__(self, *args, **kwargs):
+        cmd, arg = config.system.list()
+        self._deferred = defer.Deferred()
+        d = command(cmd, arg, bufferstd=True)
         d.addErrback(self._process_units)
+        internet.TCPClient.__init__(self, *args, **kwargs)
 
     @defer.inlineCallbacks
     def _process_units(self, reason):
@@ -690,6 +685,14 @@ class SystemManager(Entity):
                 yield SystemService(line.split(' ')[0]).show()
             except: pass
         log("Finished Checking System.")
+        self._deferred.callback(None)
+
+    def startService(self):
+        if self._deferred.called:
+            return internet.TCPClient.startService(self)
+        self._deferred.addBoth(
+            lambda x: internet.TCPClient.startService(self))
+        return self._deferred
 
 
 class Drone(service.Service):
@@ -763,27 +766,28 @@ def main():
     config.running_uid = pwd.getpwnam(config.DRONED_USER).pw_uid
     config.running_gid = grp.getgrnam(config.DRONED_GROUP).gr_gid
 
+    tracker = globals()['tracker'] = ProcessTracking(60.0)
+
     application = service.Application('droned')
+    # send messages to our command and control server
+    factory = protocol.ReconnectingClientFactory()
+    factory.protocol = AMPProtocol
+    if isinstance(config.DRONED_PORT, types.StringTypes):
+        config.DRONED_PORT = int(config.DRONED_PORT.split(':').pop())
+    service.IServiceCollection(application).addService(
+        SystemManager("127.0.0.1", config.DRONED_PORT ,factory))
     if not config.system.systemd: #supervise our command processor
         service.IServiceCollection(application).addService(Drone())
     config.reactor.callWhenRunning(
         service.IService(application).startService
     )
 
-    tracker = globals()['tracker'] = ProcessTracking(60.0)
     NotifyingPBServerFactory.allConnections = tracker
     fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
     server = endpoints.serverFromString(config.reactor, fixserver)
     config.reactor.callWhenRunning(
         server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
     
-    fixserver = config.DRONED_COMMAND_ENDPOINT.replace('path=','')
-    s = endpoints.serverFromString(config.reactor, fixserver)
-    config.reactor.callWhenRunning(s.listen, AMPServerFactory())
-    config.reactor.callWhenRunning(SystemManager)
-    #warm up the process cache.
-#    config.reactor.callWhenRunning(tracker.scheduler)
-    #watch dog setup
     config.reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService
     )
