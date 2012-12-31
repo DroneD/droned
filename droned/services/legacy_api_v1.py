@@ -130,10 +130,10 @@ class LegacyEvent(object):
 
     def trigger(self,data=None,delay=0.0):
         """trigger an event"""
-        self.data = data
         if delay:
             config.reactor.callLater(delay, self.trigger, data=data)
             return
+        self.data = data
         self.triggered = True
 
     def __repr__(self):
