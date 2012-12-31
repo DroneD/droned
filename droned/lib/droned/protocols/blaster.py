@@ -43,6 +43,12 @@ class ClockSkewException(Exception): pass
 #
 # Inter - process - communication.
 #
+class QueryProcess(amp.Command):
+    arguments = [('method', amp.String()),
+                 ('pid', amp.Integer()),
+                 ('pickledArguments', amp.String())]
+    response = [('pickledResponse', amp.String())]
+
 class ProcessStarted(amp.Command):
     arguments = [('pid', amp.Integer()),]
     response = []

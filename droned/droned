@@ -228,120 +228,12 @@ def extractData(func):
     def extractFailure(reason):
         return failure.Failure(
             pb.RemoteError(reason.type, reason.value, reason.printTraceback))
-    def decorator(self, *args, **kwargs):
-        d = defer.maybeDeferred(func, self, *args, **kwargs)
+    def decorator(*args, **kwargs):
+        d = defer.maybeDeferred(func, *args, **kwargs)
         d.addCallback(extract)
         d.addErrback(extractFailure)
         return d
     return decorator
-
-
-@process.threaded
-def proc(pid):
-    return process.Process(pid)
-
-
-class ProcessRoot(pb.Root):
-    """Provides the System Information Remote API"""
-    ###########################################################################
-    # System Wide API is defined in this block
-    ###########################################################################
-    def __init__(self, *args, **kwargs):
-        self.tracker = kwargs.pop('tracker')
-
-    def proc(self, pid):
-        return self.tracker.process_cache[pid]
-
-    @extractData
-    def remote_process_list(self):
-        return self.tracker.process_cache.keys()
-
-    @extractData
-    def remote_pid_exists(self, pid):
-        return process.pid_exists(pid)
-
-    @extractData
-    def remote_phymem_usage(self):
-        return process.phymem_usage()
-
-    @extractData
-    def remote_phymem_buffers(self):
-        return process.phymem_buffers()
-
-    @extractData
-    def remote_disk_io_counters(self):
-        return process.disk_io_counters()
-
-    @extractData
-    def remote_cpu_percent(self, interval=0.1, percpu=False):
-        return process.cpu_percent(interval=interval,percpu=percpu)
-
-    @extractData
-    def remote_network_io_counters(self, pernic=False):
-        return process.network_io_counters(pernic=pernic)
-
-    @extractData
-    def remote_find_processes(self, regex='.*'):
-        regex = re.compile(regex)
-        result = []
-        for var, val in self.tracker.process_cache.items():
-            try:
-                if regex.search(' '.join(val.cmdline)):
-                    result.append(var) 
-            except: continue
-        return result
-    ###########################################################################
-    # Process API is defined in this block
-    ###########################################################################
-    @extractData
-    def remote_process_get_connections(self, pid, kind='inet'):
-        return proc(pid).addCallback(
-            lambda x: x.get_connections(kind=kind))
-
-    @extractData
-    def remote_process_get_cpu_percent(self, pid, interval=0.1):
-        return proc(pid).addCallback(
-            lambda x: x.get_cpu_percent(interval=interval))
-
-    @extractData
-    def remote_process_get_cpu_times(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_cpu_times())
-
-    @extractData
-    def remote_process_get_io_counters(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_io_counters())
-
-    @extractData
-    def remote_process_get_ionice(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_ionice())
-
-    @extractData
-    def remote_process_get_memory_info(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_memory_info())
-    
-    @extractData
-    def remote_process_get_memory_percent(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_memory_percent())
-
-    @extractData
-    def get_num_threads(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_num_threads())
-
-    @extractData
-    def remote_process_get_open_files(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_open_files())
-
-    @extractData
-    def remote_process_get_threads(self, pid):
-        return proc(pid).addCallback(lambda x: x.get_threads())
-
-    @extractData
-    def remote_process_getcwd(self, pid):
-        return proc(pid).addCallback(lambda x: x.getcwd())
-
-    @extractData
-    def remote_process_is_running(self, pid):
-        return proc(pid).addCallback(lambda x: x.is_running())
 
 
 class ProcessTracking(Entity):
@@ -352,26 +244,12 @@ class ProcessTracking(Entity):
         self._connections = set()
         self._process_cache = {}
         self._deferred = defer.succeed({})
-        self._task = task.LoopingCall(self.scheduler)
         self._pids = set()
-
-    def add(self, addr):
-        """add tracked connection"""
-        self._connections.add(addr)
-        if not self._task.running:
-            self._task.start(self._interval)
-
-    def discard(self, addr):
-        """discard tracked connection"""
-        self._connections.discard(addr)
-        if not self._connections:
-            if self._task.running:
-                self._task.stop()
+        self._task = task.LoopingCall(self.scheduler)
+        self._task.start(self._interval)
 
     def scheduler(self):
         if self._deferred.called:
-            if not self._connections:
-                return defer.succeed(self._process_cache)
             if config.DEBUG_EVENTS:
                 log('Scanning Process Table.')
             self._deferred = self._process_scanner({})
@@ -393,6 +271,9 @@ class ProcessTracking(Entity):
         #notify droned that we lost processes
         yield defer.DeferredList(map(MessageTracking.lost, lost), consumeErrors=True)
         self._pids = newset
+        d = defer.Deferred()
+        config.reactor.callLater(3.0, d.callback, None)
+        yield d #prevent stampeeding the system
         defer.returnValue(resultDict)
 
     @process.threaded
@@ -402,15 +283,6 @@ class ProcessTracking(Entity):
                 results.update({p.pid: p})
             except: continue
         return results
-
-
-class NotifyingPBServerFactory(pb.PBServerFactory):
-    allConnections = set()
-    def buildProtocol(self, addr):
-        protocol = pb.PBServerFactory.buildProtocol(self, addr)
-        protocol.notifyOnConnect(lambda: self.allConnections.add(addr)) 
-        protocol.notifyOnDisconnect(lambda: self.allConnections.discard(addr))
-        return protocol
 
 ###############################################################################
 # DroneD Feedback mechanism.
@@ -503,6 +375,20 @@ class AMPProtocol(amp.AMP):
         if argstr:
             return getattr(SystemService(service), action)(*argstr.split(' '))
         return getattr(SystemService(service), action)()
+
+    @QueryProcess.responder
+    @defer.inlineCallbacks
+    def get_process_info(self, method, pid, pickledArguments):
+        if pid not in tracker.process_cache:
+            yield tracker.scheduler()
+        proc = tracker.process_cache[pid]
+        func = getattr(proc, method)
+        if not hasattr(func, '__call__'):
+            raise AttributeError('%s is not callable' % (method,))
+        func = extractData(func)
+        options = pickle.loads(pickledArguments)
+        result = yield func(*options['args'], **options['kwargs'])
+        defer.returnValue({'pickledResponse': pickle.dumps(result)})
 
     @Command.responder
     def gov_command(self, pickledArguments):
@@ -685,7 +571,8 @@ class SystemManager(internet.TCPClient):
                 yield SystemService(line.split(' ')[0]).show()
             except: pass
         log("Finished Checking System.")
-        self._deferred.callback(None)
+        d = tracker.scheduler()
+        d.addBoth(self._deferred.callback)
 
     def startService(self):
         if self._deferred.called:
@@ -782,11 +669,11 @@ def main():
         service.IService(application).startService
     )
 
-    NotifyingPBServerFactory.allConnections = tracker
-    fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
-    server = endpoints.serverFromString(config.reactor, fixserver)
-    config.reactor.callWhenRunning(
-        server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
+#    NotifyingPBServerFactory.allConnections = tracker
+#    fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
+#    server = endpoints.serverFromString(config.reactor, fixserver)
+#    config.reactor.callWhenRunning(
+#        server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
     
     config.reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService

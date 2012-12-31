@@ -1,63 +1,43 @@
 from droned.entity import Entity
-from droned.protocols.psproxy.process import Process as original
-from droned.models.event import Event
+from droned.protocols.blaster import QueryProcess
 from twisted.internet import defer
 
-class Process(Entity):
+try: import cPickle as pickle
+except ImportError:
+    import pickle
+
+def _callRemote(method, doc):
+    @defer.inlineCallbacks
+    def remoteMethod(self, *args, **kwargs):
+        d = self.process_broker.callRemote(
+            QueryProcess, method=method, pid=self.pid,
+            pickledArguments=pickle.dumps({'args': args, 'kwargs': kwargs}))
+        d.addErrback(lambda e: Process.delete(self) and e or e)
+        x = yield d #wait for success or destruction of this object
+        defer.returnValue(pickle.loads(x['pickledResponse']))
+    remoteMethod.__doc__ = doc
+    return remoteMethod
+
+
+def _extract_methods():
+    import psutil as _psutil
+    methods = dict()
+    for var, val in vars(_psutil.Process).items():
+        if not hasattr(val, '__call__') or var.startswith('_'):
+            continue
+        methods[var] = _callRemote(var, val.__doc__)
+    return methods
+
+
+class Process(type('Process', (Entity,), _extract_methods())):
     """mimics psutil.Process"""
     reapable = True
     def __init__(self, pid):
         self.pid = pid
-        self._process = original(pid)
 
-    def is_running(self):
-        """is the process running"""
-        return self._process.is_running()
-
-    def get_open_files(self):
-        """Returns files opened by the process"""
-        return self._process.get_open_files()
-
-    def get_threads(self):
-        """return threads open by process"""
-        return self._process.get_threads()
-
-    @defer.inlineCallbacks
-    def get_children(self):
-        """returns the children"""
-        data = yield self._process.get_children()
-        defer.returnValue([ Process(i.pid) for i in data if i.pid ])
-
-    def get_connections(self, kind='inet'):
-        """
-        Return connections opened by process as a list of namedtuples.
-        The kind parameter filters for connections that fit the following
-        criteria:
- 
-        Kind Value      Connections using
-        inet            IPv4 and IPv6
-        inet4           IPv4
-        inet6           IPv6
-        tcp             TCP
-        tcp4            TCP over IPv4
-        tcp6            TCP over IPv6
-        udp             UDP
-        udp4            UDP over IPv4
-        udp6            UDP over IPv6
-        all             the sum of all the possible families and protocols
-        """
-        return self._process.get_connections(kind=kind)
-
-    def get_cpu_times(self):
-        """return the cpu times"""
-        return self._process.get_cpu_times()
-
-    def get_memory_info(self):
-        """return the memory info"""
-        return self._process.get_memory_info()
-
-    def get_cpu_percent(self):
-        """returns cpu percent utilization"""
-        return self._process.get_cpu_percent()
+    @property
+    def process_broker(self):
+        import services
+        return services.getService('drone').service.instance
 
 __all__ = ['Process']
