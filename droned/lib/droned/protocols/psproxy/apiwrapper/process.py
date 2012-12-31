@@ -22,7 +22,9 @@ from zope.interface import Interface, implements, implementer
 from twisted.internet import threads, defer
 from twisted.python import components, util
 from romeo.entity import ParameterizedSingleton
+from kitt.decorators import deferredInThreadPool, synchronizedDeferred, debugCall
 import psutil
+import config
 
 __author__ = "Justin Venus <justin.venus@gmail.com>"
 __doc__ = getattr(psutil,'__doc__', "") + """
@@ -67,9 +69,11 @@ def threaded(function):
 
        @return L{twisted.internet.defer.Deferred}
     """
-    @threadQueue(_semaphore)
+    @synchronizedDeferred(_semaphore)
+    @deferredInThreadPool(pool=config.reactor.getThreadPool(),R=config.reactor)
     def deferredInThread(*args, **kwargs):
-        return threads.deferToThread(function, *args, **kwargs)
+        return function(*args, **kwargs)
+        #return threads.deferToThread(function, *args, **kwargs)
     return deferredInThread
 
 #vars that will be excluded
@@ -160,6 +164,7 @@ def initialScan(instance):
     try:
         instance._cache['name'] = instance.name
     except: pass
+    return instance._cache
     
 class ProcessCache(ParameterizedSingleton):
     def __call__(klass, *args, **kwargs):
@@ -167,7 +172,7 @@ class ProcessCache(ParameterizedSingleton):
         #we know this is new if the cache attribute is missing
         if not hasattr(instance, '_cache'):
             instance._cache = {'original': psutil.Process(*args,**kwargs)}
-            initialScan(instance)
+            instance.scan = initialScan(instance)
             return instance
         if klass.isValid(instance):
             if psutil.Process(instance.pid).create_time == instance.create_time:

@@ -50,7 +50,12 @@ class QueryProcess(amp.Command):
     response = [('pickledResponse', amp.String())]
 
 class ProcessStarted(amp.Command):
-    arguments = [('pid', amp.Integer()),]
+    arguments = [('pid', amp.Integer()),
+                 ('create_time', amp.Float()),
+                 ('exe', amp.String()),
+                 ('cmdline', amp.String()),
+                 ('name', amp.String()),
+                 ('original', amp.String())]
     response = []
 
 class ProcessLost(amp.Command):
@@ -157,9 +162,12 @@ class DronedServerAMP(amp.AMP):
         return result
 
     @ProcessStarted.responder
-    def processStarted(self, pid):
+    def processStarted(self, **kwargs):
         """fire a notification that we have a process"""
-        self.Event('process-started').fire(pid=pid)
+        kwargs['cmdline'] = list(
+            filter(None, kwargs.pop('cmdline','').split('\00')))
+        kwargs['original'] = kwargs['original'].replace('psutil.Proc','Proc',1)
+        self.Event('process-started').fire(**kwargs)
         return {}
 
     @ProcessLost.responder

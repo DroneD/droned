@@ -21,6 +21,8 @@ DIRECTORY = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, DIRECTORY)
 #setup our library path based on where we came from
 sys.path.insert(0, os.path.join(DIRECTORY,'lib'))
+#import config now!!!!
+import config
 
 #we will borrow some of droned's api
 #import droned.logging
@@ -239,6 +241,8 @@ def extractData(func):
 class ProcessTracking(Entity):
     """Track processes as long as we have connections."""
     process_cache = property(lambda s: s._process_cache)
+    running = property(lambda s: s._task.running)
+    deferred = property(lambda s: s._deferred) 
     def __init__(self, interval):
         self._interval = interval
         self._connections = set()
@@ -246,42 +250,73 @@ class ProcessTracking(Entity):
         self._deferred = defer.succeed({})
         self._pids = set()
         self._task = task.LoopingCall(self.scheduler)
+
+    def start(self):
+        if self.running: return
         self._task.start(self._interval)
 
+    def stop(self):
+        if not self.running: return
+        self._task.stop()
+
     def scheduler(self):
+        if not self.running:
+            return self._deferred
         if self._deferred.called:
             if config.DEBUG_EVENTS:
                 log('Scanning Process Table.')
             self._deferred = self._process_scanner({})
             self._deferred.addCallback(self._updateState)
+            if config.DEBUG_EVENTS:
+                self._deferred.addErrback(lambda x: log(x) and x or x)
             self._deferred.addErrback(lambda x: {})
         return self._deferred
 
     @defer.inlineCallbacks
     def _updateState(self, resultDict):
-        self._process_cache = resultDict
+        self._process_cache = resultDict.copy()
+        d = defer.Deferred()
+        config.reactor.callLater(0.5, d.callback, None)
+        yield d #prevent stampeeding the system
         if config.DEBUG_EVENTS:
             log('Process Table Scan Completed.')
         newset = set(resultDict.keys())
         nochange = self._pids & newset
         lost = nochange ^ self._pids
-        found = nochange ^ newset
-        #notify droned that we found new processes
-        yield defer.DeferredList(map(MessageTracking.started,found), consumeErrors=True)
-        #notify droned that we lost processes
-        yield defer.DeferredList(map(MessageTracking.lost, lost), consumeErrors=True)
+        if lost: #notify drone that we lost processes
+            yield defer.DeferredList(
+                map(MessageTracking.lost, lost), consumeErrors=True)
+        for new in nochange ^ newset:
+            try:
+                yield self.process_cache[new].scan
+                #notify drone that we found new processes
+                yield MessageTracking.started(new)
+            except:
+                if config.DEBUG_EVENTS:
+                    log('#' * 45)
+                    log('stackstrace is from debug')
+                    f = failure.Failure()
+                    f.printTraceback()
+                    log('#' * 45)
+                newset.discard(new)
+                self._process_cache.pop(new, None) 
         self._pids = newset
         d = defer.Deferred()
-        config.reactor.callLater(3.0, d.callback, None)
+        config.reactor.callLater(2.5, d.callback, None)
         yield d #prevent stampeeding the system
-        defer.returnValue(resultDict)
+        if config.DEBUG_EVENTS:
+            log("Process Count %d" % len(self.process_cache.keys()))
+        defer.returnValue(self._process_cache)
 
     @process.threaded
     def _process_scanner(self, results):
         for p in process.process_iter():
             try:
                 results.update({p.pid: p})
-            except: continue
+            except:
+                if config.DEBUG_EVENTS:
+                    f = failure.Failure()
+                    f.printTraceback()
         return results
 
 ###############################################################################
@@ -297,16 +332,28 @@ class MessageTracking(Entity):
     def discard(self, connection):
         self._connections.discard(connection)
 
-    def started(self, pid):
-        results = []
-        try: process.Process(pid)
-        except: pass
-        for c in self._connections:
-            d = c.callRemote(ProcessStarted,pid=pid)
-            results.append(d)
-        if results:
-            return defer.DeferredList(results, consumeErrors=True)
-        return defer.succeed(None)
+    @defer.inlineCallbacks
+    def started(self, pid, connection=None):
+        state = {}
+        if self._connections or connection:
+            p = tracker.process_cache.get(pid, process.Process(pid))
+            yield p.scan
+            state = {'pid': pid}
+            for i in ['create_time','cmdline','exe','name', 'original']:
+                state[i] = p._cache.get(i,'')
+                if isinstance(state[i], list):
+                    state[i] = '\00'.join(state[i])
+                elif i == 'original':
+                    state[i] = str(state[i])
+        if not connection and state:
+            results = []
+            for c in self._connections:
+                d = c.callRemote(ProcessStarted, **state)
+                results.append(d)
+            if results:
+                yield defer.DeferredList(results, consumeErrors=True)
+        elif state:
+            yield connection.callRemote(ProcessStarted, **state)
 
     def lost(self, pid):
         results = []
@@ -317,14 +364,6 @@ class MessageTracking(Entity):
             return defer.DeferredList(results, consumeErrors=True)
         return defer.succeed(None)
 
-    def stdout(self, pid, data):
-        results = []
-        for c in self._connections:
-            d = c.callRemote(ProcessStdout,pid=pid,data=data)
-            results.append(d)
-        if results:
-            return defer.DeferredList(results, consumeErrors=True)
-        return defer.succeed(None)
     def stdout(self, pid, data):
         results = []
         for c in self._connections:
@@ -364,6 +403,11 @@ class AMPProtocol(amp.AMP):
         for system in SystemService.objects:
             self.callRemote(
                 SystemSettings, state=pickle.dumps(system.__getstate__()))
+        d = []
+        for pid in tracker.process_cache.keys():
+            d.append(self.notify.started(pid, connection=self))
+        if d: defer.DeferredList(d, consumeErrors=True)
+#TODO fire a verification message.
         return amp.AMP.connectionMade(self)
 
     def connectionLost(self, reason):
@@ -570,9 +614,15 @@ class SystemManager(internet.TCPClient):
             try:
                 yield SystemService(line.split(' ')[0]).show()
             except: pass
+        tracker.start()
+        running = tracker.running
+        while not running:
+            running = yield defer.maybeDeferred(lambda: tracker.running)
+        yield tracker.deferred
+        while not len(tracker.process_cache.keys()):
+            yield tracker.scheduler()
+        self._deferred.callback(None)
         log("Finished Checking System.")
-        d = tracker.scheduler()
-        d.addBoth(self._deferred.callback)
 
     def startService(self):
         if self._deferred.called:
@@ -581,6 +631,11 @@ class SystemManager(internet.TCPClient):
             lambda x: internet.TCPClient.startService(self))
         return self._deferred
 
+    @defer.inlineCallbacks
+    def stopService(self):
+        tracker.stop()
+        yield tracker.deferred
+        yield defer.maybeDeferred(internet.TCPClient.stopService, self)
 
 class Drone(service.Service):
     """This is only used if we don't have systemd"""
@@ -608,8 +663,6 @@ class Drone(service.Service):
 # Main Setup
 ###############################################################################
 def main():
-    import config
-    globals()['config'] = config
     from kitt.daemon import owndir
 
     #take ownership of droned's directories.
@@ -669,12 +722,6 @@ def main():
         service.IService(application).startService
     )
 
-#    NotifyingPBServerFactory.allConnections = tracker
-#    fixserver = config.DRONED_PROCESS_ENDPOINT.replace('path=','')
-#    server = endpoints.serverFromString(config.reactor, fixserver)
-#    config.reactor.callWhenRunning(
-#        server.listen, NotifyingPBServerFactory(ProcessRoot(tracker=tracker)))
-    
     config.reactor.addSystemEventTrigger('before', 'shutdown',
         service.IService(application).stopService
     )

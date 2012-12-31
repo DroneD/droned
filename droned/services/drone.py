@@ -410,6 +410,7 @@ class DroneManager(MultiService, object):
 
     def _addprocess(self, occurrence):
         self._processes[occurrence.pid] = process.Process(occurrence.pid)
+        self._processes[occurrence.pid].update(**occurrence.__dict__)
 
 ###############################################################################
 # Service API Requirements

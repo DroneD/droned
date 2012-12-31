@@ -32,12 +32,23 @@ def _extract_methods():
 class Process(type('Process', (Entity,), _extract_methods())):
     """mimics psutil.Process"""
     reapable = True
+    pid = property(lambda s: s._pid)
+    exe = property(lambda s: s._data.get('exe', ''))
+    cmdline = property(lambda s: s._data.get('cmdline', []))
+    create_time = property(lambda s: s._data.get('create_time',0.0))
+    name = property(lambda s: s._data.get('name', ''))
     def __init__(self, pid):
-        self.pid = pid
+        self._pid = pid
+        self._data = {}
 
     @property
     def process_broker(self):
         import services
         return services.getService('drone').service.instance
+
+    def update(self, **data):
+        self._data.update(data)
+
+    __str__ = __repr__ = lambda s: s._data.get('original', Entity.__repr__(s))
 
 __all__ = ['Process']
