@@ -63,10 +63,10 @@ def loadAll():
                     (name,))
         #see if any classes implement the desired interfaces
         for name,obj in vars(mod).items():
+            if name.startswith('_'): continue
             try:
                 if IDroneDService.implementedBy(obj):
                     EXPORTED_SERVICES[obj.SERVICENAME] = obj() #instantiate now
-                    warnings.warn('loaded %s' % name)
                 else:
                     warnings.warn('%s from %s does not provide ' + \
                             'IDroneDService Interface' % \

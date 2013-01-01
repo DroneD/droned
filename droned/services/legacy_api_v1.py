@@ -13,14 +13,13 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 ###############################################################################
-
+from kitt.interfaces import implements, IDroneDService
 from droned.models.event import Event
 from twisted.internet import task, defer
 from twisted.python.failure import Failure
 from droned.logging import logWithContext, err
 from droned.entity import Entity
 from droned.clients import blaster
-from kitt.util import getException, dictwrapper, crashReport
 from kitt.daemon import owndir
 import threading #decorator dep
 import signal #so we can catch the server shutdown
@@ -28,6 +27,21 @@ import config
 import time
 import sys
 import os
+
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+
+from kitt.util import (
+    getException,
+    dictwrapper, 
+    crashReport,
+    LazinessException,
+    ImpossibilityException,
+    getAvailablePort,
+    dictwrapper,
+)
 
 from kitt.decorators import (
     deferredInThreadPool, 
@@ -50,52 +64,81 @@ So why does this API exists?  I was asked very nicely by a friend.
 
 """
 
-class LazinessException(Exception): pass
-
 ###############################################################################
 # drone module implementation
 ###############################################################################
 class _DroneNameSpaceModule(object):
-    def __init__(self):
-        self.data = {}
+    """Legacy Module Emulation
 
-    def items(self):
-        return self.data.items()
+       If you are looking for the help for members try this.
+
+       dict(list(${thisobject})).keys()
+
+       You should be able to run help against any of the keys using the 
+       following convention.
+
+       
+       help(${thisobject}.${some_dict-key})
+    """
+    def __init__(self, namespace):
+        self.__name__ = namespace
+        self.__package__ = None
+        sys.modules[namespace] = self
 
     def __getitem__(self, param):
-        return self.data.get(param)
+        return self.__dict__.get(param)
 
     def __setitem__(self, param, value):
-        self.data[param] = value
+        self.__dict__[param] = value
 
     def __delitem__(self, param):
-        if param in self.data:
-            del self.data[param]
+        if param in self.__dict__:
+            del self.__dict__[param]
 
     def __getattr__(self, param): #compatibility hack
         try:
-            return self.data[param]
+            return self.__dict__[param]
         except KeyError:
             raise AttributeError("%s has no attribute \"%s\"" % (self, param))
 
     def __iter__(self):
-        for key,value in sorted(self.data.items()):
+        for key,value in sorted(self.__dict__.items()):
             yield (key,value)
-drone = sys.modules['drone'] = _DroneNameSpaceModule()
+
+drone = _DroneNameSpaceModule('drone')
+drone._thrdid = config.reactor.getThreadPool().currentThread().ident
 #this is a decorator helper
 drone.twistedThread = deferredInThreadPool(
     pool=config.reactor.getThreadPool(),R=config.reactor)
+
+#api helper
+drone.inThread = lambda: (
+    drone._thrdid != config.reactor.getThreadPool().currentThread().ident)
+
+#all of these methods come from kitt.util
+drone.util = _DroneNameSpaceModule('drone.util')
+drone.util.getException = getException 
+drone.util.dictwrapper = dictwrapper
+drone.util.crashReport = crashReport
+drone.util.LazinessException = LazinessException
+drone.util.ImpossibilityException = ImpossibilityException
+drone.util.getAvailablePort = getAvailablePort
+drone.util.dictwrapper = dictwrapper
 
 ###############################################################################
 # drone.event module implementation
 ###############################################################################
 class LegacyEvent(object):
     """The Event Class used by drone.service.Service to handle events"""
-    def __init__(self,name,callback,condition=None,recurring=0.0,silent=False):
+    def __init__(
+            self,name,callback,condition=None,
+            recurring=0.0,silent=False,service=None
+        ):
         if (recurring and condition):
             raise AssertionError(
                 "recurring and condition args are mutually exclusive")
         self.name = name
+        self.service = service
         self.callback = callback
         self.condition = condition
         if self.condition: #no idea what this condition can do
@@ -117,9 +160,20 @@ class LegacyEvent(object):
 
     def execute(self):
         """execute a callback from an event"""
+        triggered = self.triggered and not bool(self.recurring)
+        import services
+        Event('legacy-event').fire(
+            event_name=self.name,
+            event_triggered=triggered,
+            event_data=self.data,
+            event_recurs=bool(self.recurring),
+            service=services.EXPORTED_SERVICES.get(self.service,None)
+        )
         self.triggered = False
         d = self.data
         self.data = None
+        if not self.callback:
+            return defer.succeed(None)
         return self.runCallback(d)
 
     @drone.twistedThread
@@ -139,7 +193,7 @@ class LegacyEvent(object):
     def __repr__(self):
         return self.name
     __str__ = __repr__
-drone.event = sys.modules['drone.event'] = _DroneNameSpaceModule()
+drone.event = _DroneNameSpaceModule('drone.event')
 drone.event.Event = LegacyEvent
 
 
@@ -157,8 +211,7 @@ semaphore = defer.DeferredSemaphore(config.MAX_CONCURRENT_COMMANDS)
 def thread_safety(func):
     """provide some measure of safety"""
     def decorator(self, *args, **kwargs):
-        tid = config.reactor.getThreadPool().currentThread().ident
-        if thread_safety._thrdid != tid:
+        if drone.inThread():
             if config.DEBUG_EVENTS:
                 debug(
                     "blocking call to %s from thread %s" % \
@@ -168,8 +221,8 @@ def thread_safety(func):
             sync = thrd(func)
             return sync(*newargs, **kwargs)
         return func(self, *args, **kwargs)
+    decorator.__doc__ = func.__doc__
     return decorator
-thread_safety._thrdid = config.reactor.getThreadPool().currentThread().ident
 
 class LegacyService(object):
     """used to store data from legacy services"""
@@ -203,18 +256,30 @@ class Service(object):
     """
        Abstract class for all Legacy DroneD Services.
 
-       Every DroneD module that impliments Service
-       method to properly register a service with
-       DroneD.
+       Every DroneD module that impliments Service can register services and
+       events with DroneD.
+
+       This modern update on a classic implementation integrates with the 
+       twisted reactor.  This base class and supporting api is meant to ease
+       the transition to new DroneD facilities and functionality.
     """
-    serviceDebug = property(lambda s: config.DEBUG_EVENTS)
-    inThread = property(lambda s: s._inThread)
-    running = property(lambda s: s._task.running)
-    name = property(lambda s: s._name)
-    deferred = property(lambda s: s._deferred)
-    deferredLock = property(lambda s: s._dLock)
+    requireLegacyState = True #write pickles on persist
+    serviceDebug = property(lambda s: config.DEBUG_EVENTS,None,None,"C{bool}")
+    inThread = property(lambda s: drone.inThread(),None,None,"C{bool}")
+    running = property(lambda s: s._task.running,None,None,"C{bool}")
+    name = property(lambda s: s._name,None,None,"Name of this Service.")
+    deferred = property(
+        lambda s: s._deferred,None,None,"L{twisted.internet.defer.Deferred}")
+    deferredLock = property(
+        lambda s: s._dLock, None, None, 
+        "L{twisted.internet.defer._ConcurrencyPrimitive} Provider")
 
     def __init__(self, name=None, delay_loop=1.0):
+        """You must call Service.__init__ from your Implementations __init__
+
+           @param name: C{str} or None - name of this service.
+           @param delay_loop: C{float} - interation frequency.
+        """
         self.events = {}
         self._task = task.LoopingCall(self.start)
         if isinstance(name, type(None)):
@@ -234,15 +299,19 @@ class Service(object):
         self._check_events = synchronizedDeferred(
             self._dLock)(self._check_events)
         #provide some safety so we know when we are in a thread
-        self._inThread = False
         self._log = logWithContext(type=logname)
-        if not os.path.exists(self.picklePath):
+        if not os.path.exists(self.picklePath) and self.requireLegacyState:
             owndir(config.DRONED_USER, self.picklePath)
         #determine whether or not to wrap the threaded method with a semaphore.
         config.reactor.addSystemEventTrigger(
             'after', 'legacy-droned-services', self._wrap)
 
     def log(self, message):
+        """Send message to the log.
+
+           @param message C{object}
+           @return C{object}
+        """
         self._log(message)
         return message
 
@@ -262,16 +331,26 @@ class Service(object):
                 self.log('gracefully cancelled thread')
 
     def start(self):
+        """Called to start the Service.
+
+           If you override this, method you must call the base implementation.
+        """
         if self._stop: return
-        Event('signal').subscribe(self._graceful)
         self._stop = False
         if not self.running:
+            Event('signal').subscribe(self._graceful)
             self._task.start(self._loop)
         if self._deferred.called:
             self._deferred = self._check_events()
             self._deferred.addErrback(lambda x: None)
+        elif config.DEBUG_EVENTS:
+            self.log('[debug] event loop is busy, skipping iteration')
 
     def stop(self):
+        """Called to stop the Service.
+
+           If you override this, method you must call the base implementation.
+        """
         self._stop = True
         Event('signal').unsubscribe(self._graceful)
         if self.running:
@@ -336,43 +415,92 @@ class Service(object):
     @thread_safety
     def registerEvent(
             self,name,callback,condition=None,recurring=0.0,silent=False):
-        'Interface to Register Service Events'
+        """Interface to Register Service Events.
+
+           @param name C{str}: name of event
+           @param callback C{callable}: Historically this has been a callable
+              but the updated version of this class will accept a non-callable
+              either way a L{droned.models.event.Event('legacy-event') will
+              fire when this legacy L{drone.event.Event} executes.
+
+           @param silent C{bool}: default False - log when event occurs.
+
+           @param condition C{callable} or None: default None - C{callable}
+              must return a C{bool}.
+
+           @param recurring C{float}: default 0.0
+
+           @NOTES: condition and recurring are mutually exclusive.
+
+           @raises AssertionError if `condition` and `recurring` are both True.
+        """
         self.events[name] = drone.event.Event(
-            name, callback, condition, recurring, silent)
+            name, callback, condition, recurring, silent, 
+            create_service_name(self)
+        )
 
     @thread_safety
     def triggerEvent(self,name,data=None,delay=0.0):
-        'Interface to trigger an out of band service event'
+        """Interface to trigger an out of band service event.
+
+           @param name C{str}:    name of event
+           @param data C{object}: default None
+           @param delay C{float}: default 0.0
+
+           @raises AttributeError if ``name`` is not a registered event.
+        """
         if name not in self.events:
-            raise AssertionError("No such event '%s'" % (name,))
-        return self.events[name].trigger(data,delay)
+            raise AttributeError("No such event '%s'" % (name,))
+        return self.events[name].trigger(data,float(delay))
 
     @thread_safety
     def disableEvent(self,name):
-        'Interface to disable a previously registered service event'
+        """Interface to disable a previously registered service event.
+
+           @param name C{str}:  name of event
+
+           @raises AttributeError if ``name`` is not a registered event.
+        """
         if name not in self.events:
-            raise AssertionError("No such event '%s'" % (name,))
+            raise AttributeError("No such event '%s'" % (name,))
         self.events[name].enabled = False
 
     @thread_safety
     def enableEvent(self,name):
-        'Interface to enable a previously disabled registered service event'
+        """Interface to enable a previously disabled registered service event.
+
+           @param name C{str}:  name of event
+
+           @raises AttributeError if ``name`` is not a registered event.
+        """
         if name not in self.events:
-            raise AssertionError("No such event '%s'" % (name,))
+            raise AttributeError("No such event '%s'" % (name,))
         self.events[name].enabled = True
 
     def set(self,var,val):
-        "persist and maintain type, note actions only get str's"
-        atype = type(vars(self)[var])
+        """persist and maintain type, note actions only get str's
+
+           @param var C{str}:    name of attribute
+           @param val C{object}: value of attribute to set
+
+           @raises AttributeError if ``var`` is not in namespace.
+        """
+        try:
+            atype = type(vars(self)[var])
+        except:
+            raise AttributeError("%s does not exist in my namespace" % (var,))
         if atype is bool:
             if str(val).lower() == 'true': val = True
             if str(val).lower() == 'false': val = False
-        #automatically set the write type; if possible, else exception
+        #automatically set the right type; if possible, else exception
         self.persist(var, atype(val))
 
     def getConfig(self):
-        "romeo is a better fit, compared to the old service config."
-        x = "%s:%s" % (self.__class__.__name__,self.name)
+        """romeo is a better fit, compared to the old service config.
+
+           @return C{dict}
+        """
+        x = create_service_name(self)
         x = config.SERVICES.get(x, {})
         if x: return x
         x = config.SERVICES.get(self.name, {})
@@ -381,11 +509,14 @@ class Service(object):
         return x #good luck
 
     def containerDebug(self, Bool=None):
+        """Legacy method, does nothing."""
         return 'not available'
 
     def debugReport(self):
         """
         Kind of emulated twisted.python.failure.Failure, but not as useful.
+
+        Will display an exception report in the log if it catches an exception.
         """
         f = None
         try: f = Failure()
@@ -412,6 +543,12 @@ class Service(object):
 
     @thread_safety
     def load(self,var,default=None,private=False):
+        """Load attribute into our namespace.
+
+           @param var C{str}: name   of attribute to load
+           @param default C{object}: default None
+           @param private C{bool}:   default False (unused)
+        """
 #NOTE private is legacy and unused
         if default is None:
             vars(self)[var] = self._service.context[var]
@@ -428,19 +565,42 @@ class Service(object):
             try: self.persist(var)
             except: pass
 
+    def _persist(self, result, var, val):
+        """result parameter may come from a callback."""
+        p = open('%s/%s.pickle' % (self.picklePath,var),'w')
+        pickle.dump(val,p,-1)
+        p.close() #return result, to avoid breakage
+        return result
+
     @thread_safety
     def persist(self,var,val=None,private=False):
+        """Save attribute from our namespace.
+
+           @param var C{str}:      name of attribute to save
+           @param val C{object}:   default None
+           @param private C{bool}: default False (unused)
+        """
 #NOTE private is legacy and unused
         if val is None: val = vars(self)[var]
         vars(self)[var] = self._service.context[var] = val
+        if self.requireLegacyState and drone.inThread():
+            return self._persist(None, var, val)
+        elif self.requireLegacyState:
+            func = drone.twistedThread(self._persist)
+            if not self.deferred.called:
+                self.deferred.addBoth(func, var, val)
+            else: #borrow the private deferred object
+                self._deferred = func(None, var, val)
+                self._deferred.addErrback(lambda x: None)
 
     __str__ = __repr__ = lambda self: self.name
 
 
 #just barely implement the interface for a droned service,
 #we will complete the implementation later.
-class BridgeService(object):
+class _BridgeService(object):
     """bridges original drone.service api to services api"""
+    implements(IDroneDService)
     service = property(lambda s: s._service)
     def running(self): return self._service.running
     def start(self): return self.service.start()
@@ -471,9 +631,7 @@ class LegacyAction(object):
 # legacy core droned server side api implementation.
 ###############################################################################
 class EmulateClassicDroned(object):
-    """This class pretends to be the original droned server interfaces.
-       It is missing a lot of unused API and that is fine, you don't need it.
-    """
+    """Emulation of the original droned server interfaces."""
     def __init__(self):
         self.services = {}
         self.actions = {}
@@ -492,6 +650,9 @@ class EmulateClassicDroned(object):
     def registerAction(self, name, function):
         """legacy action support"""
         from droned.models.server import drone as _drone
+        #needed to wait for the modules to settle down for this.
+        if 'KeyRing' not in drone.util:
+            drone.util.KeyRing = _drone.keyRing
         if not function.__doc__:
             raise LazinessException("The %s action has no docstring!!!" % name)
         if name in _drone.builtins:
@@ -509,8 +670,12 @@ class DelayedInstance(type):
     """
     We need to delay the construction of the Instance until droned is ready.
     """
+    server = property(lambda c: c._server,
+        None, None, EmulateClassicDroned.__doc__)
+
     def __init__(cls, name, bases, members):
         super(DelayedInstance, cls).__init__(name, bases, members)
+        cls._server = EmulateClassicDroned()
 
     def __call__(cls, *args, **kwargs):
         #allocate memory for the class object.
@@ -522,23 +687,26 @@ class DelayedInstance(type):
             'before', 'droned-configured', instance.__init__, *args, **kwargs)
         return instance #return partially initialized instance
 
-drone.service = sys.modules['drone.service'] = _DroneNameSpaceModule()
+drone.service = _DroneNameSpaceModule('drone.service')
 # control the construction of the legacy service class
 drone.service.Service = DelayedInstance(
     'Service', (Service,),
     {
-        'server': EmulateClassicDroned(), #historic
-        'WEB_ROOT': property(lambda s: config.DRONED_WEBROOT), #historic
+        'server': property(lambda s: s.__class__.server, None, None,
+            EmulateClassicDroned.__doc__),
+        'WEB_ROOT': property(lambda s: config.DRONED_WEBROOT, None, None,
+            """Location of DroneD's http root directory"""),
         'picklePath': property(
-            lambda s: os.path.join(config.DRONED_HOMEDIR,s.name)) #historic
+            lambda s: os.path.join(config.DRONED_HOMEDIR,s.name), None, None,
+            """Location to store private pickles and data."""),
+        '__doc__': Service.__doc__
     }
 )
-drone.service.thread_safety = thread_safety
 
 ###############################################################################
 # drone.decorators module implementation.
 ###############################################################################
-drone.decorators = sys.modules['drone.decorators'] = _DroneNameSpaceModule()
+drone.decorators = _DroneNameSpaceModule('drone.decorators')
 def synchronized(lock):
     "The function will run with the given lock acquired"
     def decorator(func):
@@ -547,8 +715,11 @@ def synchronized(lock):
             try: return func(*args,**kwargs)
             finally: lock.release()
         return newfunc
+    decorator.__doc__ = func.__doc__
     return decorator
 drone.decorators.synchronized = synchronized
+#add thread safety to the decorators.
+drone.decorators.thread_safety = thread_safety
 
 def threaded(func):
     "Make a function run in its own thread (returns Thread object)"
@@ -556,6 +727,7 @@ def threaded(func):
         t = threading.Thread(target=func,args=args,kwargs=kwargs)
         t.start()
         return t
+    decorator.__doc__ = func.__doc__
     return decorator
 drone.decorators.threaded = threaded
 
@@ -563,8 +735,7 @@ def delayedLoop(delay):
     "Run a function in a repeating loop with a delay between iterations"
     def decorator(func):
         def newfunc(*args,**kwargs):
-            thrid = config.reactor.getThreadPool().currentThread().ident
-            if thrid == delayedLoop._thrdid:
+            if drone.inThread():
                 raise LazinessException("""
                     Blocking call to ``reactor`` detected.
 
@@ -574,8 +745,8 @@ def delayedLoop(delay):
                 func(*args,**kwargs)
                 time.sleep(float(delay))
         return newfunc
+    decorator.__doc__ = func.__doc__
     return decorator
-delayedLoop._thrdid = config.reactor.getThreadPool().currentThread().ident
 drone.decorators.delayedLoop = delayedLoop
 
 def safe(func):
@@ -589,6 +760,7 @@ def safe(func):
         except KeyboardInterrupt: raise
         except SystemExit: raise
         except: Failure().printTraceback()
+    newfunc.__doc__ = func.__doc__
     return newfunc
 drone.decorators.safe = safe
 
@@ -596,11 +768,10 @@ drone.decorators.safe = safe
 ###############################################################################
 # drone.blaster module support
 ###############################################################################
-drone.blaster = sys.modules['drone.blaster'] = _DroneNameSpaceModule()
+drone.blaster = _DroneNameSpaceModule('drone.blaster')
 
 def _blast(message, hosts, sigkey, timeout=120, ContentEncoding=None):
-    thrid = config.reactor.getThreadPool().currentThread().ident
-    if thrid == _blast._thrdid:
+    if drone.inThread():
         #thanks for using the legacy api
         raise LazinessException("""
         You have called a ``reactor`` blocking legacy method for blaster
@@ -622,17 +793,22 @@ def _blast(message, hosts, sigkey, timeout=120, ContentEncoding=None):
     for var, val in sync(message, hosts, sigkey, timeout=timeout).items():
         result[var] = tuple([val['code'], val['description']])
     return result
-_blast._thrdid = config.reactor.getThreadPool().currentThread().ident
 drone.blaster.blast = _blast
+
+
+def create_service_name(obj):
+    """Create a service name from a legacy service"""
+    name = "%s:%s" % (obj.__class__.__name__, obj.name)
+    if obj.__class__.__name__ == obj.name:
+        name = obj.name
+    return name
 
 # dyamically create new-style droned services from old style services.
 # without the aid of a zope interface adapter.
 def create_service(obj):
     """Bridge the classic droned service to the modern service api"""
-    name = "%s_%s" % (obj.__class__.__name__, obj.name)
-    if obj.__class__.__name__ == obj.name:
-        name = obj.name
-    return (name, type(name, (BridgeService,), 
+    name = create_service_name(obj)
+    return (name, type(name, (_BridgeService,), 
         {
             '_service': obj, 
             'SERVICENAME': name, 

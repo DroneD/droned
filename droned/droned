@@ -399,6 +399,7 @@ MessageTracking = MessageTracking()
 class AMPProtocol(amp.AMP):
     notify = MessageTracking
     def connectionMade(self):
+        log("Updating peer %s" % (self.transport.getPeer(),))
         self.notify.add(self)
         for system in SystemService.objects:
             self.callRemote(
@@ -411,6 +412,7 @@ class AMPProtocol(amp.AMP):
         return amp.AMP.connectionMade(self)
 
     def connectionLost(self, reason):
+        log("Lost peer %s" % (self.transport.getPeer(),))
         self.notify.discard(self)
         return amp.AMP.connectionLost(self, reason)
 

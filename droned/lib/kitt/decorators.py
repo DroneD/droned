@@ -24,6 +24,7 @@ def deferred(func):
     """This decorator wraps a method in a maybeDeferred"""
     def newfunc(*args, **kwargs):
         return defer.maybeDeferred(func, *args, **kwargs)
+    newfunc.__doc__ = func.__doc__
     return newfunc
 
 
@@ -40,6 +41,7 @@ def deferredAsThread(func):
     """
     def newfunc(*args, **kwargs):
         return threads.deferToThread(func, *args, **kwargs)
+    newfunc.__doc__ = func.__doc__
     return newfunc
 
 
@@ -70,6 +72,7 @@ def deferredInThreadPool(pool=None, R=None):
                I return a deferred and will fire callbacks or errbacks.
             """
             return threads.deferToThreadPool(R, pool, func, *a, **kw)
+        newfunc.__doc__ = func.__doc__
         return newfunc
     return decorator
 
@@ -91,15 +94,14 @@ def synchronizedInThread(R=None):
     """
     if not R:
         try:
-            import config
-            reactor = config.reactor
+            import config.reactor as R
         except:
-            from twisted.internet import reactor
-        R = reactor
+            import twisted.internet.reactor as R
     def decorator(func):
         def newfunc(*a, **kw):
             #works with deferred and blocking methods
             return threads.blockingCallFromThread(R, func, *a, **kw)
+        newfunc.__doc__ = func.__doc__
         return newfunc
     return decorator
 
@@ -118,15 +120,14 @@ def threadSafeDeferred(R=None):
     """
     if not R:
         try:
-            import config
-            reactor = config.reactor
+            import config.reactor as R
         except:
-            from twisted.internet import reactor
-        R = reactor
+            import twisted.internet.reactor as R
     def decorator(func): 
         def newfunc(*a, **kw):
             return func(*a, **kw)
         #decorate newfunc in a blocking reactor call
+        newfunc.__doc__ = func.__doc__
         return synchronizedInThread(R)(newfunc)
     #decorate decorator in a thread
     return deferredAsThread(decorator)
@@ -148,17 +149,16 @@ def threadSafePoolDeferred(pool=None, R=None):
     """
     if not R:
         try:
-            import config
-            reactor = config.reactor
+            import config.reactor as R
         except:
-            from twisted.internet import reactor
-        R = reactor
+            import twisted.internet.reactor as R
     if not pool: #pick a thread pool
         pool = R.getThreadPool()
     def decorator(func): 
         def newfunc(*a, **kw):
             return func(*a, **kw)
         #decorate newfunc in a blocking reactor call
+        newfunc.__doc__ = func.__doc__
         return synchronizedInThread(R)(newfunc)
     #decorate decorator in a thread pool
     return deferredInThreadPool(pool, R)(decorator)
@@ -177,6 +177,7 @@ def synchronizedDeferred(lock):
         """
         def newfunc(*args,**kwargs):
             return lock.run(func,*args,**kwargs)
+        newfunc.__doc__ = func.__doc__
         return newfunc
     return decorator
 
@@ -201,6 +202,7 @@ def raises(exc):
                 exc_inst = exc(err_msg)
                 exc_inst.inner_exception = caught_exc
                 raise exc_inst
+        newfunc.__doc__ = func.__doc__
         return newfunc
     return decorator
 
@@ -220,6 +222,7 @@ def safe(defaults):
             }
             caller = _InspectorGadget(func, **debugKwargs)
             return caller(*args,**kwargs)
+        newfunc.__doc__ = func.__doc__
         return newfunc
     return decorator
 
@@ -251,6 +254,7 @@ def debugCall(func, **debugKwargs):
             debugKwargs['trap'] = None
         caller = _InspectorGadget(func, **debugKwargs)
         return caller(*args, **kwargs)
+    newfunc.__doc__ = func.__doc__
     return newfunc
 
 
@@ -347,6 +351,7 @@ def retry(delay=0.25, maximum=10, trap=None, debug=False, fd=None,
                 result.raiseException()
             return result
         return newfunc
+    decorator.__doc__ = func.__doc__
     return decorator
 
 
@@ -361,6 +366,7 @@ def typesafety(*typs,**kwtyps):
             args = util.addSelf(args)
             return func(*args,**kwargs)
         return enforcer
+    decorator.__doc__ = func.__doc__
     return decorator
 
 
@@ -555,7 +561,7 @@ class _InspectorGadget(object):
 
 class InvalidArgsLengthException(Exception):pass
 
-_EXPORTS = [
+__all__ = [
     'deferredAsThread',
     'deferredInThreadPool',
     'synchronizedInThread',
@@ -567,6 +573,3 @@ _EXPORTS = [
     'retry',
     'typesafety',
 ]
-
-#export our methods
-__all__ = _EXPORTS

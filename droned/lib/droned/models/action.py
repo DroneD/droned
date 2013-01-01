@@ -103,9 +103,11 @@ class AdminAction(Entity):
     def buildDoc(self):
         """You might need this, so it is provided. Rebuilds help <action>"""
         self.__doc__ = "Usage: %s <command> [options]\n\n" % (self.action,)
+        data = []
         for name,args,doc in self.exposedMethodInfo:
             argStr = ' '.join(['<'+arg+'>' for arg in args])
-            self.__doc__ += "  %s %s\t%s\n" % (name,argStr,doc)
+            data += ["  %s %s\t%s\n" % (name,argStr,doc)]
+        self.__doc__ += ''.join(sorted(data))
 
 
     #FIXME, document this better and clean it up
