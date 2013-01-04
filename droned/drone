@@ -132,7 +132,7 @@ drone.log('logging subsystem initialized')
 
 
 from twisted.application import service
-from twisted.internet import defer, endpoints, protocol
+from twisted.internet import defer, protocol
 from twisted.python.failure import Failure
 from twisted.python.log import err
 from droned.entity import Entity
