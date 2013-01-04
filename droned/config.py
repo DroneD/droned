@@ -14,16 +14,7 @@
 #   limitations under the License.
 ###############################################################################
 
-import platform
-_name = platform.system().lower()
-if _name == 'linux':
-    try: #we should have epollreactor
-        from twisted.internet import epollreactor
-        epollreactor.install()
-    except: pass
-#todo finish filling the reactors out
-
-from twisted.internet import reactor
+from kitt.reactor import reactor
 
 from twisted.python import usage, util
 import copyright
