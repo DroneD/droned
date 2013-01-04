@@ -6,7 +6,7 @@
 %define systemd 1
 %endif
 
-%if (0%{?rhel} < 6)
+%if ! (0%{?rhel} > 6 || 0%{?fedora} > 11)
 %define ghost_safe 0
 %define need_simplejson 1
 %define skip_requires 1
