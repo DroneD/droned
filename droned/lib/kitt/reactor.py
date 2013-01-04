@@ -1,5 +1,3 @@
-from twisted.internet import reactor
-
 ###############################################################################
 #   Copyright 2006 to the present, Orbitz Worldwide, LLC.
 #
