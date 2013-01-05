@@ -27,7 +27,7 @@ def _extract_methods():
         if not hasattr(val, '__call__') or var.startswith('_'):
             continue
         methods[var] = _callRemote(var, val.__doc__)
-        print "Loading proc support for ``%s``" % var
+#        print "Loading proc support for ``%s``" % var
     return methods
 
 
