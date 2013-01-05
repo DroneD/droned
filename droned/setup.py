@@ -108,8 +108,6 @@ doc_files = [ ('doc', [ os.path.join(WHEREAMI, i) for i in glob('doc/*') \
         if os.path.isfile(i)]) ]
 _data = [
     'primes',
-    'drone',
-    'droned'
 ]
 #fix for rpmbuild
 extra_files = [ ('.', [ os.path.join(WHEREAMI, i) for i in _data \

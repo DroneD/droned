@@ -9,12 +9,15 @@
 %if (0%{?rhel} < 6)
 %define ghost_safe 0
 %define need_simplejson 1
+%define skip_requires 1
 %else
 %define ghost_safe 1
 %define need_simplejson 0
+%define skip_requires 0
 %endif
 
-#adding explicit python2 requirement
+#adding explicit python2 requirement, this also allows you
+#to override the default python interpretor on RHEL/Centos 5.
 %{?__python2: %define __python %__python2}
 
 Name:		droned
@@ -30,10 +33,12 @@ Source0:	%{name}-%{version}.tar
 BuildRoot:	%(mktemp -ud %{_tmppath}/%{name}-%{version}-%{release}-XXXXXX)
 
 BuildRequires:	%{__python}
-Requires:	python-twisted
 Requires:	python-romeo
+%if ! %{?skip_requires}
+Requires:	python-twisted
 Requires:	python-ctypes
 Requires:	python-psutil
+%endif
 Requires(post):	openssl
 
 
@@ -47,10 +52,12 @@ network communication.
 %package -n python-romeo
 Summary:	Relational Object Mapping of Environmental Organization
 Group:		Development/Languages
+%if ! %{?skip_requires}
 Requires:	PyYAML
 Requires:	python-ctypes
 %if %{need_simplejson}
 Requires:	python-simplejson
+%endif
 %endif
 
 
@@ -74,7 +81,9 @@ well with DroneD and I will happily retire Romeo.
 Summary:	Command line utilities for manipulating romeo files
 Group:		Applications/System
 Requires:	python-romeo 
+%if ! %{?skip_requires}
 Requires:	python-twisted
+%endif
 
 
 %description -n romeo-utils
@@ -85,8 +94,9 @@ manipulating romeo environment description files.
 %package rls2
 Summary:	Command line utility for examining configuration
 Group:		Applications/System
+%if ! %{?skip_requires}
 Requires:	python-twisted
-
+%endif
 
 %description rls2
 The provided utility is exactly like the rls command in romeo-utils,
@@ -134,7 +144,6 @@ egrep -v '*.pyo|*.pyc' %{name}/INSTALLED_FILES.orig | \
 
 #make a log dir, can be used by droned's daemon maker
 #even if systemd is present on the system.
-%{__mkdir_p} $RPM_BUILD_ROOT/var/log/%{name}
 %if %{systemd}
 #install redhat systemd units
 %{__install} -D contrib/redhat/%{name}.service \
@@ -149,6 +158,12 @@ egrep -v '*.pyo|*.pyc' %{name}/INSTALLED_FILES.orig | \
 %{__install} -D contrib/redhat/%{name}.sys \
 	$RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/%{name}
 %endif
+
+#this is a hack atm.
+%{__mv} $RPM_BUILD_ROOT%{_bindir}/drone $RPM_BUILD_ROOT%{_datadir}/%{name}/drone
+%{__mv} $RPM_BUILD_ROOT%{_bindir}/%{name} $RPM_BUILD_ROOT%{_datadir}/%{name}/%{name}
+sed -i 's|%{_bindir}/drone$|%{_datadir}/%{name}/drone|' %{name}/INSTALLED_FILES
+sed -i 's|%{_bindir}/%{name}$|%{_datadir}/%{name}/%{name}|' %{name}/INSTALLED_FILES
 
 
 #write basic start configuration
@@ -236,11 +251,9 @@ fi
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/%{name}.service
 %config(noreplace) %attr(644,root,root) /lib/systemd/system/private-drone.service
 %exclude %{_bindir}/%{name}
-%exclude /var/log/%{name}
 %else
 %attr(755,root,root) %{_sysconfdir}/init.d/%{name}
 %config(noreplace) %attr(644,root,root) %{_sysconfdir}/sysconfig/%{name}
-%dir /var/log/%{name}
 %endif
 %dir %{_sysconfdir}/pki/%{name}
 %if %{ghost_safe}
