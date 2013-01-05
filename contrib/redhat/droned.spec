@@ -20,6 +20,9 @@
 #to override the default python interpretor on RHEL/Centos 5.
 %{?__python2: %define __python %__python2}
 
+#redefine sitelib in the event that python has been overrode for centos5
+%define python_sitelib %(%{__python} -c "from distutils.sysconfig import get_python_lib; import sys; sys.stdout.write(get_python_lib())")
+
 Name:		droned
 Version:        1.9.1
 Release:	1%{?dist}
@@ -261,6 +264,20 @@ fi
 %ghost %attr(644,root,root) %{_sysconfdir}/pki/%{name}/local.public
 %endif
 %dir %{_datadir}/%{name}
+%dir %{_datadir}/%{name}/lib
+%dir %{_datadir}/%{name}/lib/droned
+%dir %{_datadir}/%{name}/lib/droned/models
+%dir %{_datadir}/%{name}/lib/droned/management
+%dir %{_datadir}/%{name}/lib/droned/events
+%dir %{_datadir}/%{name}/lib/droned/protocols
+%dir %{_datadir}/%{name}/lib/droned/protocols/psproxy
+%dir %{_datadir}/%{name}/lib/droned/protocols/psproxy/apiwrapper
+%dir %{_datadir}/%{name}/lib/droned/clients
+%dir %{_datadir}/%{name}/lib/kitt
+%dir %{_datadir}/%{name}/lib/kitt/numeric
+%dir %{_datadir}/%{name}/lib/kitt/interfaces
+%dir %{_datadir}/%{name}/services
+%dir %{_datadir}/%{name}/doc
 %dir /var/lib/%{name}
 %exclude %{_bindir}/rls2
 
@@ -269,6 +286,11 @@ fi
 %defattr(-,root,root,-)
 %doc LICENSE README NEWS romeo/example/*
 %dir %{_sysconfdir}/hostdb
+%dir %{python_sitelib}/romeo
+%dir %{python_sitelib}/romeo/grammars
+%dir %{python_sitelib}/romeo/rules
+%dir %{python_sitelib}/romeo/directives
+%dir %{python_sitelib}/romeo/decryption
 %exclude %{_bindir}/rls
 %exclude %{_bindir}/createrdb
 
