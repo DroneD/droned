@@ -714,8 +714,8 @@ def synchronized(lock):
             lock.acquire()
             try: return func(*args,**kwargs)
             finally: lock.release()
+        newfunc.__doc__ = func.__doc__
         return newfunc
-    decorator.__doc__ = func.__doc__
     return decorator
 drone.decorators.synchronized = synchronized
 #add thread safety to the decorators.
@@ -744,8 +744,8 @@ def delayedLoop(delay):
             while True:
                 func(*args,**kwargs)
                 time.sleep(float(delay))
+        newfunc.__doc__ = func.__doc__
         return newfunc
-    decorator.__doc__ = func.__doc__
     return decorator
 drone.decorators.delayedLoop = delayedLoop
 
