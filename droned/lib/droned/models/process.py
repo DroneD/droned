@@ -1,6 +1,7 @@
 from droned.entity import Entity
 from droned.protocols.blaster import QueryProcess
 from twisted.internet import defer
+import re
 
 try: import cPickle as pickle
 except ImportError:
@@ -52,4 +53,24 @@ class Process(type('Process', (Entity,), _extract_methods())):
 
     __str__ = __repr__ = lambda s: s._data.get('original', Entity.__repr__(s))
 
-__all__ = ['Process']
+
+def find_processes(s):
+    """finds all processes that match the regex
+
+       searches the command line.
+
+       @rtype generator
+    """
+    regex = re.compile(s, re.I)
+    for pid in Process.objects:
+        cmd = ' '.join(pid.cmdline)
+        if not cmd: continue
+        match = regex.search(cmd)
+        if not match: continue
+        yield pid
+
+def list_pids():
+    """returns the known process list"""
+    return [i.pid for i in Process.objects]
+
+__all__ = ['Process', 'find_processes', 'list_pids']
