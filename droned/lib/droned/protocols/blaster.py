@@ -6,6 +6,8 @@ from twisted.python import failure
 import struct
 import time
 
+from kitt.decorators import debugCall
+from romeo import MYHOSTNAME
 
 DIGEST_INIT = None
 try: #newer versions of python
@@ -39,17 +41,41 @@ class ZeroAttackException(Exception): pass
 class SignatureException(Exception): pass
 class UnactionableException(Exception): pass
 class ClockSkewException(Exception): pass
+class PrivilegedCommand(Exception): pass
+class UnknownEndpoint(Exception): pass
+
+class TrustedCommand(amp.Command):
+    """use this class to check the identity of the remote connection."""
+    errors = {PrivilegedCommand: 'REQUIRES_TRUST'}
+
+    @classmethod
+    def responder(cls, methodfunc):
+        def trusted(func):
+            def decorator(self, *args, **kwargs):
+                if not self.trusted:
+                    raise PrivilegedCommand(
+                        '[%s] command requires trust.' % (cls.__name__,))
+                return func(self, *args, **kwargs)
+            return decorator
+        return super(TrustedCommand,cls).responder(trusted(methodfunc))
+
+#
+# Send identity
+#
+class Identity(amp.Command):
+    arguments = [('hostname', amp.String())]
+    response = []
 
 #
 # Inter - process - communication.
 #
-class QueryProcess(amp.Command):
+class QueryProcess(TrustedCommand):
     arguments = [('method', amp.String()),
                  ('pid', amp.Integer()),
                  ('pickledArguments', amp.String())]
     response = [('pickledResponse', amp.String())]
 
-class ProcessStarted(amp.Command):
+class ProcessStarted(TrustedCommand):
     arguments = [('pid', amp.Integer()),
                  ('create_time', amp.Float()),
                  ('exe', amp.String()),
@@ -58,26 +84,26 @@ class ProcessStarted(amp.Command):
                  ('original', amp.String())]
     response = []
 
-class ProcessLost(amp.Command):
+class ProcessLost(TrustedCommand):
     arguments = [('pid', amp.Integer()),]
     response = []
 
-class ProcessStdout(amp.Command):
+class ProcessStdout(TrustedCommand):
     arguments = [('pid', amp.Integer()),
                  ('data', amp.String())]
     response = []
 
-class ProcessStderr(amp.Command):
+class ProcessStderr(TrustedCommand):
     arguments = [('pid', amp.Integer()),
                  ('data', amp.String())]
     response = []
 
-class ProcessExited(amp.Command):
+class ProcessExited(TrustedCommand):
     arguments = [('pid', amp.Integer()),
                  ('exitCode', amp.Integer())]
     response = []
 
-class SystemCtrl(amp.Command):
+class SystemCtrl(TrustedCommand):
     arguments = [('service', amp.String()),
                  ('action', amp.String()),
                  ('argstr', amp.String())]
@@ -86,7 +112,7 @@ class SystemCtrl(amp.Command):
                 ('signal', amp.String()),
                 ('status', amp.Integer())]
 
-class Command(amp.Command):
+class Command(TrustedCommand):
     arguments = [
         ('pickledArguments', amp.String())
     ]
@@ -95,33 +121,44 @@ class Command(amp.Command):
                 ('signal', amp.String()),
                 ('status', amp.Integer())]
 
-class SystemSettings(amp.Command):
+class SystemSettings(TrustedCommand):
     arguments = [('state', amp.String()),]
     response = []
 
 #
+# Connection Authorization
+#
+class Authorize(amp.Command):
+    arguments = [
+        ('key', amp.String()),
+        ('timestamp', amp.Integer()),
+        ('signature', amp.String()),
+        ('magic', amp.String()),
+    ]
+    response = []
+    errors = {
+        MagicException: 'INVALID_MAGIC',
+        ZeroAttackException: 'ZERO_ATTACK',
+        SignatureException: 'INVALID_SIGNATURE',
+        ClockSkewException: 'CLOCK_SKEW',
+        UnknownEndpoint: 'UNKNOWN_CLIENT_NAME'
+    }
+
+#
 # Blaster commands
 #
-class DroneCommand(amp.Command):
+class DroneCommand(TrustedCommand):
     """Executes a command"""
     arguments = [
         ('command', amp.String()),
-        ('magic', amp.String()),
-        ('timestamp', amp.Integer()),
-        ('key', amp.String()),
-        ('signature', amp.String())
     ]
     response = [
         ('code', amp.Integer()),
         ('sections', amp.Integer())
     ]
     errors = {
-        MagicException: 'INVALID_MAGIC',
-        ZeroAttackException: 'ZERO_ATTACK',
-        SignatureException: 'INVALID_SIGNATURE',
         UnactionableException: 'INVALID_ACTION',
         DroneCommandFailed: 'COMMAND_FAILED',
-        ClockSkewException: 'CLOCK_SKEW',
     }
 
 
@@ -140,26 +177,107 @@ class DronePrime(amp.Command):
     response = [('prime', amp.Integer())]
 
 
-class DronedServerAMP(amp.AMP):
+
+class DronedServerAMP(amp.AMP, object):
     """Implements the server side droned amp protocol"""
+    keyObj = property(
+        lambda s: s._drone.keyRing.publicKeys[s._key],
+        None,
+        None,
+        "reloadable public key for this connection.")
     def __init__(self, *args, **kwargs):
         self._unionWorker = kwargs.pop('factory', None)
         self._logger = kwargs.pop('logger', lambda x: None)
         amp.AMP.__init__(self, *args, **kwargs)
-        from droned.models.server import drone
+        from droned.models.server import drone, Server
         from droned.models.event import Event
         import config
         self.Event = Event
+        self.Server = Server
         self._prime = 0
         self.config = config
         self._drone = drone
         self.sections = []
+        self.trusted = False
+        self.server = None
+        self.hostname = None
+        self._key = None
 
     def loseConnection(self):
+        """clean up when the client disconnects."""
         result = amp.AMP.loseConnection(self)
         if self._prime:
             self._drone.releasePrime(self._prime)
         return result
+
+    @Authorize.responder
+    def receiveAuthorization(self, key, timestamp, signature, magic):
+        """Sets up connection authorization.
+
+           @ptype key - C{str}
+           @param key - RSA Key name used for the signature
+           @ptype timestamp - C{int}
+           @param timestamp - time of connection from the client
+           @ptype signature - C{str}
+           @param signature - rsa encrypted payload of the client hostname
+           @ptype magic - C{str}
+           @param magic - byte packed number that factors with the shared prime
+        """
+        #do not blindly trust b/c droneblaster cannot be guarenteed to be used
+        #by a trusted agent. if authorization is requested, make sure it passes
+#        if self.trusted:
+#            return {}
+
+        if not self.hostname:
+            raise UnknownEndpoint(
+                "You forgot to send your hostname on connection.")
+
+        if not self._prime:
+            raise ZeroAttackException(
+                "Attempted Zero-Attack, dropping request")
+
+        # get the server public key
+        self._key = key
+
+        if abs(int(time.time()) - timestamp) > 120:
+            raise ClockSkewException("Timestamp is too far out of sync")
+
+        magicNumber = abs(unpackify(magic))
+        if magicNumber == 0:
+            raise ZeroAttackException(
+                "Attempted Zero-Attack, dropping request")
+        if (magicNumber % self._prime) != 0:
+            raise MagicException("Invalid Magic String")
+
+        digest = DIGEST_INIT()
+        digest.update(str(magic) + str(timestamp) + str(self.hostname))
+
+        assumed = digest.hexdigest()
+        trusted = self.keyObj.decrypt(signature)
+
+        if trusted != assumed:
+            raise SignatureException(
+                "Invalid signature: %s != %s" % (assumed,trusted))
+        host = self.transport.getHandle().getpeername()[0]
+        if self.config.DEBUG_EVENTS:
+            self._logger(
+                'Authorizing Connection for %s at %s' % (self.hostname, host))
+        self.trusted = True #this connection is considered trusted.
+        return {}
+
+    @Identity.responder
+    def receiveIdentity(self, hostname):
+        """receive the identity of the remote connection"""
+        self.hostname = hostname
+        if not self.Server.exists(hostname):
+            return {}
+        self.server = self.Server(hostname)
+        if MYHOSTNAME == hostname:
+            if self.transport.getPeer().host == self.transport.getHost().host:
+                self.trusted = True #we can trust ourself by default
+                return {}
+#TODO think about automatic authorization from romeo
+        return {}
 
     @ProcessStarted.responder
     def processStarted(self, **kwargs):
@@ -203,39 +321,20 @@ class DronedServerAMP(amp.AMP):
     @DronePrime.responder
     @defer.inlineCallbacks
     def getPrime(self):
-        """get the prime initializer"""
+        """get the prime initializer
+
+           @rtype C{dict}
+           @return a prime number valid for this connection.
+        """
         self._prime = yield self._drone.getprime()
         defer.returnValue({'prime': self._prime})
 
-
     @DroneCommand.responder
     @defer.inlineCallbacks
-    def executeCommand(self, command, magic, timestamp, key, signature):
+    def executeCommand(self, command):
         """execute the command on the server"""
         result = {}
         try:
-            if abs(int(time.time()) - timestamp) > 120:
-                raise ClockSkewException("Timestamp is too far out of sync")
-
-            magicNumber = abs(unpackify(magic))
-
-            if magicNumber == 0:
-                raise ZeroAttackException(
-                    "Attempted Zero-Attack, dropping request")
-
-            if (magicNumber % self._prime) != 0:
-                raise MagicException("Invalid Magic String")
-
-            digest = DIGEST_INIT()
-            digest.update(str(magic) + str(timestamp) + str(command))
-
-            assumed = digest.hexdigest()
-            trusted = self._drone.keyRing.publicDecrypt(key, signature)
-
-            if trusted != assumed:
-                raise SignatureException(
-                    "Invalid signature: %s != %s" % (assumed,trusted))
-
             action = command.split(' ')[0]
             args = command.replace(action,'').lstrip()
             try:
@@ -247,7 +346,7 @@ class DronedServerAMP(amp.AMP):
 
             #get the remote host for this connection
             host = self.transport.getHandle().getpeername()[0]
-            self._logger('Executing "%s" for %s@%s' % (command, key, host))
+            self._logger('Executing "%s" for %s@%s' % (command,self._key,host))
             #get the result of the request as a deferred
             data = yield defer.maybeDeferred(func, args).addBoth(
                 self._drone.formatResults)
@@ -321,27 +420,51 @@ class DronedClientAMP(amp.AMP):
     def __init__(self, *args, **kwargs):
         amp.AMP.__init__(self, *args, **kwargs)
         self._prime = 0
-        self._deferred = defer.Deferred()
+        self.deferred = defer.Deferred()
+        self.keyobj = None
 
     def connectionMade(self):
         result = amp.AMP.connectionMade(self)
-        d = self.callRemote(DronePrime)
-        d.addCallback(
-            lambda d: setattr(self, '_prime', int(d['prime'])))
-        d.addBoth(self._deferred.callback)
+        d = self._on_connection()
+        d.addBoth(self.deferred.callback)
         return result
 
     @defer.inlineCallbacks
-    def getPrime(self):
-        yield self._deferred
-        defer.returnValue(self._prime)
+    def _on_connection(self):
+        # send out the identity from romeo first
+        yield self.callRemote(Identity, hostname=MYHOSTNAME)
+        # ask for the prime initializer
+        data = yield self.callRemote(DronePrime)
+        self._prime = int(data['prime'])
 
     @defer.inlineCallbacks
-    def executeCommand(self, **kwargs):
+    def getPrime(self):
+        yield self.deferred
+        defer.returnValue(self._prime)
+
+    def requestAuthorization(self, keyobj, magic, timestamp, signature=None):
+        key = keyobj.id
+        self.keyobj = keyobj
+        if not signature:
+            digest = DIGEST_INIT()
+            payload = str(magic) + str(timestamp) + str(MYHOSTNAME)
+            digest.update(payload)
+            signature = keyObj.encrypt(digest.hexdigest())
+        try:
+            d = self.callRemote(Authorize, key=key, timestamp=timestamp, 
+                signature=signature, magic=magic)
+        except:
+            return defer.fail()
+        #on authorization failure close the connection.
+        d.addErrback(lambda x: self.transport.loseConnection() and x or x)
+        return d #return the deferred now.
+
+    @defer.inlineCallbacks
+    def executeCommand(self, command):
         result = {}
         data = None
         try:
-            data = yield self.callRemote(DroneCommand, **kwargs)
+            data = yield self.callRemote(DroneCommand, command=command)
             result['code'] = int(data['code'])
             sections = int(data['sections'])
             description = ""
@@ -394,27 +517,29 @@ class MultiClient(object):
         return result
 
     @defer.inlineCallbacks
+    def _collect(self, result, host, port):
+        self.collected[(host,port)] = result
+        r = yield result.getPrime()
+        self.value *= r
+        defer.returnValue(result) 
+
+    @defer.inlineCallbacks
     def __call__(self, command, keyObj):
         result = {}
         commands = []
         data = {}
-        collected = {}
+
+        self.collected = {}
 
         digest = DIGEST_INIT()
         timestamp = int(time.time())
-
-        @defer.inlineCallbacks
-        def collect(result, host, port):
-            collected[(host,port)] = result
-            r = yield result.getPrime()
-            self.value *= r
-            defer.returnValue(result) 
 
         #connect to all clients
         for (host, port) in self.servers.keys():
             client = protocol.ClientCreator(self.reactor, DronedClientAMP)
             d = client.connectTCP(host, port)
-            d.addCallback(collect, host, port)
+            #modifies the collected dictionary on callback
+            d.addCallback(self._collect, host, port)
             d.addErrback(self._update, host, port)
             commands.append(d)
 
@@ -423,24 +548,30 @@ class MultiClient(object):
 
         #build the shared arguments
         magicStr = packify(self.value)
-        payload = str(magicStr) + str(timestamp) + str(command)
+        payload = str(magicStr) + str(timestamp) + str(MYHOSTNAME)
         digest.update(payload)
         signature = keyObj.encrypt(digest.hexdigest())
 
-        kwargs = {
-            'command': command,
-            'magic': magicStr,
-            'timestamp': timestamp,
-            'key': keyObj.id,
-            'signature': signature,
-        }
-
-        for ((host, port),connection) in collected.items():
-            d = connection.executeCommand(**kwargs)
-            d.addBoth(self._update, host, port)
-            d.addBoth(lambda s: connection.loseConnection())
+        #authorize the connection. and immediately send command.
+        for ((host, port),connection) in self.collected.items():
+            d = connection.requestAuthorization(
+                keyObj, magicStr, timestamp, signature)
+            d.addCallback(self._command, connection, host, port, command)
+            d.addErrback(self._update, host, port)
             commands.append(d)
 
-        #wait for all commands to be returned. 
-        yield defer.DeferredList(commands, consumeErrors=True)
+        #wait for authorization and command to complete.
+        yield defer.DeferredList(commands,consumeErrors=True)
+        self.collected = {}
         defer.returnValue(self.servers)
+
+    def _command(self, result, conn, host, port, com):
+        if isinstance(result, failure.Failure):
+            return result
+        try:
+            d = conn.executeCommand(com)
+            d.addBoth(self._update, host, port)
+            d.addBoth(lambda s: conn.transport.loseConnection())
+            return d #return the current deferred.
+        except:
+            return defer.fail()

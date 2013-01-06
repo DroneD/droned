@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 import sys
 import os
 
@@ -396,25 +396,32 @@ class MessageTracking(Entity):
 MessageTracking = MessageTracking()
 
 
-class AMPProtocol(amp.AMP):
+class AMPProtocol(DronedClientAMP):
+    trusted = True #we had better trust ourself
     notify = MessageTracking
     def connectionMade(self):
-        log("Updating peer %s" % (self.transport.getPeer(),))
+        result = DronedClientAMP.connectionMade(self)
+        self._deferred = self._afterConnect()
+        return result
+
+    @defer.inlineCallbacks
+    def _afterConnect(self):
+        yield self.deferred #from the protocol
         self.notify.add(self)
+        log("Updating peer %s" % (self.transport.getPeer(),))
         for system in SystemService.objects:
             self.callRemote(
                 SystemSettings, state=pickle.dumps(system.__getstate__()))
         d = []
         for pid in tracker.process_cache.keys():
             d.append(self.notify.started(pid, connection=self))
-        if d: defer.DeferredList(d, consumeErrors=True)
-#TODO fire a verification message.
-        return amp.AMP.connectionMade(self)
+        if d:
+            yield defer.DeferredList(d, consumeErrors=True)
 
     def connectionLost(self, reason):
         log("Lost peer %s" % (self.transport.getPeer(),))
         self.notify.discard(self)
-        return amp.AMP.connectionLost(self, reason)
+        return DronedClientAMP.connectionLost(self, reason)
 
     @SystemCtrl.responder
     def gov_systemctl(self, service, action, argstr):
