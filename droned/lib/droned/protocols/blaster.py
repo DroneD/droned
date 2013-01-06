@@ -137,11 +137,13 @@ class Authorize(amp.Command):
     ]
     response = []
     errors = {
+        PrivilegedCommand: 'REQUIRES_TRUST',
         MagicException: 'INVALID_MAGIC',
         ZeroAttackException: 'ZERO_ATTACK',
         SignatureException: 'INVALID_SIGNATURE',
         ClockSkewException: 'CLOCK_SKEW',
-        UnknownEndpoint: 'UNKNOWN_CLIENT_NAME'
+        UnknownEndpoint: 'UNKNOWN_CLIENT_NAME',
+        KeyError: 'UNKNOWN_KEY',
     }
 
 #
