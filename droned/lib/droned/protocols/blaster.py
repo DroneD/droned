@@ -3,6 +3,7 @@ from twisted.internet import defer, protocol
 from twisted.web import server, static
 from droned.errors import DroneCommandFailed
 from twisted.python import failure
+import binascii
 import struct
 import time
 
@@ -144,6 +145,7 @@ class Authorize(amp.Command):
         ClockSkewException: 'CLOCK_SKEW',
         UnknownEndpoint: 'UNKNOWN_CLIENT_NAME',
         KeyError: 'UNKNOWN_KEY',
+        ValueError: 'RSA_ERROR'
     }
 
 #
@@ -178,9 +180,29 @@ class DronePrime(amp.Command):
     arguments = []
     response = [('prime', amp.Integer())]
 
+import traceback
 
+class DronedProtocol(amp.AMP, object):
+    def sendBox(self, box):
+        if hasattr(self, 'keyObj') and self.keyObj and self.trusted:
+            try:
+                return self.transport.write(
+                    self.keyObj.encrypt(box.serialize()))
+            except: pass
+        try:
+            return amp.AMP.sendBox(self, box)
+        except: self.transport.loseConnection()
 
-class DronedServerAMP(amp.AMP, object):
+    def dataReceived(self, data):
+        if hasattr(self, 'keyObj') and self.keyObj:
+            try:
+                data = self.keyObj.decrypt(data)
+            except: pass #initial conversations are clear
+        try:
+            return amp.AMP.dataReceived(self, data)
+        except: self.transport.loseConnection()
+
+class DronedServerAMP(DronedProtocol):
     """Implements the server side droned amp protocol"""
     keyObj = property(
         lambda s: s._drone.keyRing.publicKeys[s._key],
@@ -190,7 +212,7 @@ class DronedServerAMP(amp.AMP, object):
     def __init__(self, *args, **kwargs):
         self._unionWorker = kwargs.pop('factory', None)
         self._logger = kwargs.pop('logger', lambda x: None)
-        amp.AMP.__init__(self, *args, **kwargs)
+        DronedProtocol.__init__(self, *args, **kwargs)
         from droned.models.server import drone, Server
         from droned.models.event import Event
         import config
@@ -207,7 +229,7 @@ class DronedServerAMP(amp.AMP, object):
 
     def loseConnection(self):
         """clean up when the client disconnects."""
-        result = amp.AMP.loseConnection(self)
+        result = DronedProtocol.loseConnection(self)
         if self._prime:
             self._drone.releasePrime(self._prime)
         return result
@@ -276,7 +298,8 @@ class DronedServerAMP(amp.AMP, object):
         self.server = self.Server(hostname)
         if MYHOSTNAME == hostname:
             if self.transport.getPeer().host == self.transport.getHost().host:
-                self.trusted = True #we can trust ourself by default
+                self._key = self.config.DRONED_MASTER_KEY.id
+#                self.trusted = True #we can trust ourself by default
                 return {}
 #TODO think about automatic authorization from romeo
         return {}
@@ -383,7 +406,7 @@ class DronedServerAMP(amp.AMP, object):
                     self.transport.getPeer())
                 self.innerProtocol.transport = self.transport
                 return self.dataReceived(data)
-        return amp.AMP.dataReceived(self, data)
+        return DronedProtocol.dataReceived(self, data)
 
     @staticmethod
     def split_(seq):
@@ -417,16 +440,17 @@ class DroneServerFactory(protocol.ServerFactory, object):
         raise AttributeError("%s" % ' '.join(list(args)))
         
 
-class DronedClientAMP(amp.AMP):
+class DronedClientAMP(DronedProtocol):
     """Implements the client side droned amp protocol"""
     def __init__(self, *args, **kwargs):
-        amp.AMP.__init__(self, *args, **kwargs)
+        DronedProtocol.__init__(self, *args, **kwargs)
         self._prime = 0
         self.deferred = defer.Deferred()
-        self.keyobj = None
+        self.keyObj = None
+        self.trusted = False
 
     def connectionMade(self):
-        result = amp.AMP.connectionMade(self)
+        result = DronedProtocol.connectionMade(self)
         d = self._on_connection()
         d.addBoth(self.deferred.callback)
         return result
@@ -444,20 +468,28 @@ class DronedClientAMP(amp.AMP):
         yield self.deferred
         defer.returnValue(self._prime)
 
-    def requestAuthorization(self, keyobj, magic, timestamp, signature=None):
+    def requestAuthorization(self, keyobj, magic=None, timestamp=None, signature=None):
         key = keyobj.id
-        self.keyobj = keyobj
+        self.keyObj = keyobj
+        if not magic:
+            signature = None
+            timestamp = None
+            magic = packify(self._prime)
+        if not timestamp:
+            signature = None
+            timestamp = int(time.time())
         if not signature:
             digest = DIGEST_INIT()
             payload = str(magic) + str(timestamp) + str(MYHOSTNAME)
             digest.update(payload)
-            signature = keyObj.encrypt(digest.hexdigest())
+            signature = self.keyObj.encrypt(digest.hexdigest())
         try:
             d = self.callRemote(Authorize, key=key, timestamp=timestamp, 
                 signature=signature, magic=magic)
         except:
             return defer.fail()
         #on authorization failure close the connection.
+        d.addCallback(lambda s: setattr(self, 'trusted', True) and s or s)
         d.addErrback(lambda x: self.transport.loseConnection() and x or x)
         return d #return the deferred now.
 

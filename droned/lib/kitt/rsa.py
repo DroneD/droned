@@ -124,25 +124,56 @@ class PublicKey(object):
   def decrypt(self, text):
     return _process(text, libcrypto.RSA_public_decrypt, self.key)
 
-
 #The real magic happens here
+
 def _process(source, func, key):
   dest = ""
   dest_buf_size = libcrypto.RSA_size(key)
   dest_buf = libc.malloc( dest_buf_size )
   if not dest_buf:
     raise AssertionError("Failed to malloc. Damn.")
+  actual = 0
   while source:
     read_len = min( len(source), dest_buf_size )
+    if 'encrypt' in func.__name__:
+      # flen must be less than RSA_size(rsa) - 11 for the PKCS #1 v1.5 based 
+      # padding mode.  This caused the encrypt failures on long messages.
+      #
+      # see http://www.openssl.org/docs/crypto/RSA_public_encrypt.html
+      # see http://www.openssl.org/docs/crypto/RSA_private_encrypt.html
+      if bool(int(libcrypto.RSA_size(key) - 11) < read_len):
+        read_len = int(libcrypto.RSA_size(key) - 11)
+    
     i = func(read_len, source, dest_buf, key, PADDING)
 
+    if 'encrypt' in func.__name__:
+      actual += i
+    else:
+      actual += read_len
     if i == -1 or libcrypto.ERR_peek_error():
       libcrypto.ERR_clear_error()
       libc.free(dest_buf)
       raise ValueError("Operation failed due to invalid input")
 
-    dest += string_at(dest_buf, i)
+    if 'encrypt' in func.__name__:
+      dest += string_at(dest_buf, read_len < i and i or read_len)
+    else:
+      dest += string_at(dest_buf, i)
     source = source[read_len:]
 
   libc.free(dest_buf)
-  return dest
+  #don't return more than we are supposed to.
+  return dest[0:actual]
+
+
+
+
+if __name__ == '__main__':
+  #need to ensure we can encrypt and decrypt long messages.
+  x = PublicKey('/etc/pki/droned/local.public')
+  y = PrivateKey('/etc/pki/droned/local.private')
+  f = open('/var/log/message').read()
+  print '\n\nTesting Public Encrypt/Decrypt'
+  print y.decrypt(x.encrypt(f))
+  print '\n\nTesting Private Encrypt/Decrypt'
+  print x.decrypt(y.encrypt(f))

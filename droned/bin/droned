@@ -397,20 +397,21 @@ MessageTracking = MessageTracking()
 
 
 class AMPProtocol(DronedClientAMP):
-    trusted = True #we had better trust ourself
     notify = MessageTracking
     def connectionMade(self):
         result = DronedClientAMP.connectionMade(self)
         self._deferred = self._afterConnect()
+        self._deferred.addErrback(log)
         return result
 
     @defer.inlineCallbacks
     def _afterConnect(self):
         yield self.deferred #from the protocol
+        yield self.requestAuthorization(config.DRONED_MASTER_KEY)
         self.notify.add(self)
         log("Updating peer %s" % (self.transport.getPeer(),))
         for system in SystemService.objects:
-            self.callRemote(
+            yield self.callRemote(
                 SystemSettings, state=pickle.dumps(system.__getstate__()))
         d = []
         for pid in tracker.process_cache.keys():
