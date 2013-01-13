@@ -741,7 +741,7 @@ def delayedLoop(delay):
     "Run a function in a repeating loop with a delay between iterations"
     def decorator(func):
         def newfunc(*args,**kwargs):
-            if drone.inThread():
+            if not drone.inThread():
                 raise LazinessException("""
                     Blocking call to ``reactor`` detected.
 
@@ -777,7 +777,7 @@ drone.decorators.safe = safe
 drone.blaster = _DroneNameSpaceModule('drone.blaster')
 
 def _blast(message, hosts, sigkey, timeout=120, ContentEncoding=None):
-    if drone.inThread():
+    if not drone.inThread():
         #thanks for using the legacy api
         raise LazinessException("""
         You have called a ``reactor`` blocking legacy method for blaster
