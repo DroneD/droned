@@ -418,6 +418,7 @@ class AMPProtocol(DronedClientAMP):
             d.append(self.notify.started(pid, connection=self))
         if d:
             yield defer.DeferredList(d, consumeErrors=True)
+        self.factory.resetDelay() #reset the connection delay
 
     def connectionLost(self, reason):
         log("Lost peer %s" % (self.transport.getPeer(),))
@@ -669,6 +670,16 @@ class Drone(service.Service):
         service.Service.stopService(self)
         return self.deferred 
 
+class Reconnector(protocol.ReconnectingClientFactory, object):
+      noisy = property(lambda s: config.DEBUG_EVENTS)
+
+      def buildProtocol(self, *args, **kwargs):
+          """make sure we can reset the connection delay."""
+          proto = protocol.ReconnectingClientFactory.buildProtocol(
+              self, *args, **kwargs)
+          proto.factory = self
+          return proto
+
 ###############################################################################
 # Main Setup
 ###############################################################################
@@ -720,7 +731,7 @@ def main():
 
     application = service.Application('droned')
     # send messages to our command and control server
-    factory = protocol.ReconnectingClientFactory()
+    factory = Reconnector()
     factory.protocol = AMPProtocol
     if isinstance(config.DRONED_PORT, types.StringTypes):
         config.DRONED_PORT = int(config.DRONED_PORT.split(':').pop())

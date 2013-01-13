@@ -91,7 +91,8 @@ class BlasterResult(object):
         end = time.time()
         sys.stdout.write("Run Time: %.3f seconds\n" % (end - self.start,))
         #stop the reactor so we can get the return code set
-        reactor.stop()
+        if reactor.running:
+            reactor.stop()
         return result
 
 

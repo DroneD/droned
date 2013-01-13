@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 ###############################################################################
 #   Copyright 2006 to the present, Orbitz Worldwide, LLC.
 #
@@ -53,7 +53,8 @@ class Daemon(object):
             #suppress further signals
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             self.log('Received SIGTERM Shutting Down in 5 seconds')
-            config.reactor.callLater(5.0, config.reactor.stop)
+            if config.reactor.running:
+                config.reactor.callLater(5.0, config.reactor.stop)
         #imported below in this file
         Event('signal').fire(
             signum=signum,

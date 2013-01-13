@@ -33,7 +33,7 @@ from twisted.application import internet
 from twisted.application.service import MultiService
 from twisted.web import server, static, resource
 from twisted.web.error import NoResource
-from twisted.internet import defer, task, protocol
+from twisted.internet import defer, task, protocol, error
 import config
 import romeo
 
@@ -416,7 +416,16 @@ class DroneManager(MultiService, object):
         Event('process-lost').subscribe(self._delprocess)
         Event('process-exited').subscribe(self._delprocess)
         Event('system-state').subscribe(self._systemState)
-        return MultiService.startService(self)
+        try:
+            return MultiService.startService(self)
+        except:
+            f = Failure()
+            if f.check(error.CannotListenError):
+                server_log('Fatal Server Error Encountered, DroneD will exit')
+                server_log(f.getErrorMessage())
+                if config.reactor.running:
+                    config.reactor.stop()
+            else: return f
 
     def stopService(self):
         Event('process-started').unsubscribe(self._addprocess)
