@@ -46,6 +46,7 @@ import gc
 
 from droned.protocols.blaster import DroneServerFactory, SystemCtrl, Command
 from droned.models.event import Event
+from droned.models.server import Server
 from droned.models import process
 from twisted.protocols import amp
 
@@ -347,12 +348,12 @@ class DroneManager(MultiService, object):
     """Responsible for connecting to priviledged process"""
     def __init__(self):
         MultiService.__init__(self)
-        self.instance = None
+        
 
     def _systemState(self, occurrence):
+        if occurrence.server is not Server(config.HOSTNAME):
+            return #don't accept other servers problems.
         state = occurrence.state
-        if self.instance is not occurrence.connector:
-            self.instance = occurrence.connector
         from droned.models.action import AdminAction
         systemd = pickle.loads(state)
         name = systemd['name'].replace('.service','')
@@ -371,14 +372,23 @@ class DroneManager(MultiService, object):
         admin.buildDoc()
 
     def dispatch(self, service, action):
+        @defer.inlineCallbacks
         def comm(*args):
             a = ''
             if args:
                 a = ' '.join(list(args))
-            return self.instance.callRemote(
+            x = Server(config.HOSTNAME).connection
+            while not x:
+                d = defer.Deferred()
+                config.reactor.callLater(0.1, d.callback, None)
+                yield d # wait a moment for the reactor
+                x = Server(config.HOSTNAME).connection
+            result = yield x.connection.callRemote(
                 SystemCtrl, service=service, action=action, argstr=a)
+            defer.returnValue(result)
         return comm
 
+    @defer.inlineCallbacks
     def command(self, executable, *args, **kwargs):
         if not args:
             args = [[]]
@@ -387,11 +397,21 @@ class DroneManager(MultiService, object):
             'args': args,
             'kwargs': kwargs
         }
-        return self.instance.callRemote(
+        #wait for the connection to establish
+        x = Server(config.HOSTNAME).connection
+        while not x:
+            d = defer.Deferred()
+            config.reactor.callLater(0.1, d.callback, None)
+            yield d # wait a moment for the reactor
+            x = Server(config.HOSTNAME).connection
+
+        d = yield x.callRemote(
             Command, pickledArguments=pickle.dumps(options))
+        defer.returnValue(d)
 
     def startService(self):
-        self._processes = {os.getpid(): process.Process(os.getpid())}
+        self._processes = {os.getpid(): 
+            process.Process(Server(config.HOSTNAME), os.getpid())}
         Event('process-started').subscribe(self._addprocess)
         Event('process-lost').subscribe(self._delprocess)
         Event('process-exited').subscribe(self._delprocess)
@@ -406,11 +426,13 @@ class DroneManager(MultiService, object):
         return MultiService.stopService(self)
 
     def _delprocess(self, occurrence):
-        self._processes.pop(occurrence.pid, None)
+        self._processes.pop((occurrence.server,occurrence.pid), None)
 
     def _addprocess(self, occurrence):
-        self._processes[occurrence.pid] = process.Process(occurrence.pid)
-        self._processes[occurrence.pid].update(**occurrence.__dict__)
+        self._processes[(occurrence.server,occurrence.pid)] = process.Process(
+            occurrence.server, occurrence.pid)
+        self._processes[(occurrence.server,occurrence.pid)].update(
+            **occurrence.__dict__)
 
 ###############################################################################
 # Service API Requirements

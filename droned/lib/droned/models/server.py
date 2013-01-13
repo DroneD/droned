@@ -24,6 +24,8 @@ import copyright
 
 from kitt.interfaces import implements, IDroneModelServer
 
+from kitt.decorators import debugCall
+
 class Server(Entity):
     implements(IDroneModelServer)
     connectFailure = None
@@ -34,6 +36,7 @@ class Server(Entity):
     logs = {}
 
     def __init__(self, hostname):
+        self._connection = None
         self.hostname = hostname
         self.droned = DroneD(self)
         self.manager = ServerManager(self)
@@ -44,6 +47,15 @@ class Server(Entity):
             'connectFailure' : self.connectFailure,
             'debug' : self.debug,
         }
+
+    @property
+    def connection(self):
+        return self._connection
+
+    @connection.setter
+    def connection(self, value):
+        if value.server is self:
+            self._connection = value
 
     @staticmethod
     def construct(state):

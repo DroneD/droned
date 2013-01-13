@@ -87,7 +87,8 @@ class _command(object):
         self._getService = services.getService
 
     def __call__(self, executable, *args, **kwargs):
-        return self._getService('drone').command(executable, *args, **kwargs)
+        return self._getService('drone').service.command(
+            executable, *args, **kwargs)
 command = _command()
 
 __all__ = ['connect', 'command', 'cancelTask']

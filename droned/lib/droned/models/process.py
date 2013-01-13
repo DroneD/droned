@@ -39,14 +39,14 @@ class Process(type('Process', (Entity,), _extract_methods())):
     cmdline = property(lambda s: s._data.get('cmdline', []))
     create_time = property(lambda s: s._data.get('create_time',0.0))
     name = property(lambda s: s._data.get('name', ''))
-    def __init__(self, pid):
+    def __init__(self, server, pid):
+        self._server = server
         self._pid = pid
         self._data = {}
 
     @property
     def process_broker(self):
-        import services
-        return services.getService('drone').service.instance
+        return self._server.connection
 
     def update(self, **data):
         self._data.update(data)

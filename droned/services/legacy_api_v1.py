@@ -15,7 +15,7 @@
 ###############################################################################
 from kitt.interfaces import implements, IDroneDService
 from droned.models.event import Event
-from twisted.internet import task, defer
+from twisted.internet import task, defer, threads
 from twisted.python.failure import Failure
 from droned.logging import logWithContext, err
 from droned.entity import Entity
@@ -173,14 +173,27 @@ class LegacyEvent(object):
         d = self.data
         self.data = None
         if not self.callback:
-            return defer.succeed(None)
+            return defer.succeed(d)
         return self.runCallback(d)
 
     @drone.twistedThread
     def runCallback(self, data):
         """run the call back function"""
-        if data: return self.callback(data)
-        else: return self.callback()
+        result = None
+        if data:
+           result = self.callback(data)
+        else:
+           result = self.callback()
+        # know someone will make this mistake, so i should account for it.
+        if isinstance(result, defer.Deferred):
+            n = self.callback.__name__
+            if config.DEBUG_EVENTS:
+                debug(
+                    '%s is a deferred method wrapped in a thread' % (n,))
+                debug('Use event api to work with twisted')
+            return threads.blockingCallFromThread(
+                config.reactor, lambda: result) 
+        return result
 
     def trigger(self,data=None,delay=0.0):
         """trigger an event"""
@@ -385,22 +398,15 @@ class Service(object):
                 occurred = event.occurred()
                 if not occurred:
                     if not event.condition: continue
-                    self._inthread = True
-                    d = event.condition()
-                    d.addBoth(
-                        lambda x: setattr(self, '_inthread', False) and x or x)
-                    occurred = yield d
+                    occurred = yield event.condition()
                 if occurred:
-                    func = event.callback.__name__
-                    if not event.silent:
+                    if hasattr(event.callback, '__name__'):
+                        func = event.callback.__name__
+                    else: 
+                        func = 'anonymous event handlers'
+                    if not event.silent or config.DEBUG_EVENTS:
                         self.log('%s event occurred: calling %s' % (event,func))
-                    elif bool(config.DEBUG_EVENTS):
-                        debug('%s event occurred: calling %s' % (event,func))
-                    self._inthread = True
-                    d = event.execute() #the event is executed in the thread
-                    d.addBoth(
-                        lambda x: setattr(self, '_inthread', False) and x or x)
-                    yield d
+                    yield event.execute() #event likely executed in a threadpool
             except:
                 if bool(config.DEBUG_EVENTS):
                     err('Legacy Event [%s] executing %s' % \
@@ -616,7 +622,7 @@ class LegacyAction(object):
         self._server = droned_server
         self._func = func
 
-    @deferredAsThread
+    @drone.twistedThread
     def __call__(self, *args, **kwargs):
         result = self._func(self._server, *args, **kwargs)
         if isinstance(result, tuple):
@@ -665,7 +671,7 @@ class EmulateClassicDroned(object):
         """legacy service support"""
         self.services[_service.name] = _service
 
-
+emulation = EmulateClassicDroned()
 class DelayedInstance(type):
     """
     We need to delay the construction of the Instance until droned is ready.
@@ -675,7 +681,7 @@ class DelayedInstance(type):
 
     def __init__(cls, name, bases, members):
         super(DelayedInstance, cls).__init__(name, bases, members)
-        cls._server = EmulateClassicDroned()
+        cls._server = emulation
 
     def __call__(cls, *args, **kwargs):
         #allocate memory for the class object.
@@ -862,7 +868,6 @@ except AssertionError: pass
 except: err('Something bad happened')
 
 # to avoid circular dependencies we will update the service api out of band.
-#config.reactor.addSystemEventTrigger('after', 'droned-configured', loadAll)
 config.reactor.addSystemEventTrigger('after', 'droned-configured', initialize)
 if config.DEBUG_EVENTS: debug("Enabled Legacy DroneD Service API Hooks")
 __all__ = [] #don't expose anything, b/c we are just a loader.

@@ -229,6 +229,7 @@ class DronedServerAMP(DronedProtocol):
 
     def loseConnection(self):
         """clean up when the client disconnects."""
+        self.server.connection = None
         result = DronedProtocol.loseConnection(self)
         if self._prime:
             self._drone.releasePrime(self._prime)
@@ -310,37 +311,41 @@ class DronedServerAMP(DronedProtocol):
         kwargs['cmdline'] = list(
             filter(None, kwargs.pop('cmdline','').split('\00')))
         kwargs['original'] = kwargs['original'].replace('psutil.Proc','Proc',1)
+        kwargs['server'] = self.server
         self.Event('process-started').fire(**kwargs)
         return {}
 
     @ProcessLost.responder
     def processLost(self, pid):
         """fire a notification that we have lost a process"""
-        self.Event('process-lost').fire(pid=pid)
+        self.Event('process-lost').fire(pid=pid,server=self.server)
         return {}
 
     @ProcessStdout.responder
     def processStdout(self, pid, data):
         """fire a notification that we have stdout from a process"""
-        self.Event('process-stdout').fire(pid=pid, data=data)
+        self.Event('process-stdout').fire(pid=pid,data=data,server=self.server)
         return {}
 
     @ProcessStderr.responder
     def processStderr(self, pid, data):
         """fire a notification that we have stderr from a process"""
-        self.Event('process-stderr').fire(pid=pid, data=data)
+        self.Event('process-stderr').fire(pid=pid,data=data,server=self.server)
         return {}
 
     @ProcessExited.responder
     def processExited(self, pid, exitCode):
         """fire a notification that we a process has exited"""
-        self.Event('process-exited').fire(pid=pid, exitCode=exitCode)
+        self.Event('process-exited').fire(
+            pid=pid,exitCode=exitCode,server=self.server)
         return {}
 
     @SystemSettings.responder
     def systemState(self, state):
         """fire a notification that we have received system state info."""
-        self.Event('system-state').fire(connector=self, state=state)
+        if self.server is self.Server(MYHOSTNAME):
+            self.server.connection = self
+            self.Event('system-state').fire(state=state,server=self.server)
         return {}
         
     @DronePrime.responder
