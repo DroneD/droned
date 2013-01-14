@@ -3,12 +3,30 @@ from twisted.internet import defer, protocol
 from twisted.web import server, static
 from droned.errors import DroneCommandFailed
 from twisted.python import failure
-import binascii
+import getpass
 import struct
 import time
+import os
+
 
 from kitt.decorators import debugCall
 from romeo import MYHOSTNAME
+
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util import randpool
+#credit for AES implementation goes to Josh VanderLinden in the following
+#http://www.codekoala.com/blog/2009/aes-encryption-python-using-pycrypto/
+#we need good enough obfuscation and this handles it.
+except ImportError:
+#NOTE see fixme below
+#    import warnings
+#    warnings.warn('AES encyption is not available RSA key is vunerable')
+    AES = None
+    randpool = None
+
+#FIXME
+AES_CURRENTLY_BROKEN = True
 
 DIGEST_INIT = None
 try: #newer versions of python
@@ -47,7 +65,10 @@ class UnknownEndpoint(Exception): pass
 
 class TrustedCommand(amp.Command):
     """use this class to check the identity of the remote connection."""
-    errors = {PrivilegedCommand: 'REQUIRES_TRUST'}
+    errors = {
+        KeyError: 'UNKNOWN_KEY',
+        PrivilegedCommand: 'REQUIRES_TRUST'
+    }
 
     @classmethod
     def responder(cls, methodfunc):
@@ -126,6 +147,12 @@ class SystemSettings(TrustedCommand):
     arguments = [('state', amp.String()),]
     response = []
 
+class SendUser(TrustedCommand):
+    arguments = [
+        ('user', amp.String()),
+        ('crypto', amp.Boolean()),
+    ]
+    response = [('secret', amp.String())]
 #
 # Connection Authorization
 #
@@ -183,24 +210,94 @@ class DronePrime(amp.Command):
 import traceback
 
 class DronedProtocol(amp.AMP, object):
-    def sendBox(self, box):
-        if hasattr(self, 'keyObj') and self.keyObj and self.trusted:
-            try:
-                return self.transport.write(
-                    self.keyObj.encrypt(box.serialize()))
-            except: pass
-        try:
-            return amp.AMP.sendBox(self, box)
-        except: self.transport.loseConnection()
+    mode = AES and AES.MODE_CBC or None
+    pool_size = 512
+    block_size = 16
+    key_size = 32
 
+    def encodeAES(self, text):
+        """if a shared secret exists encrypt AES"""
+        assert hasattr(self, 'secret') and self.secret
+        pad = self.block_size - len(text) % self.block_size
+        iv_bytes = randpool.RandomPool(
+            self.pool_size
+        ).get_bytes(self.block_size)
+        encrypted_bytes = iv_bytes + AES.new(
+            self.secret,
+            self.mode,
+            iv_bytes
+        ).encrypt(text + pad * chr(pad))
+        return encrypted_bytes
+
+    def decodeAES(self, encrypted_bytes):
+        """if a shared secret exists decrypt AES"""
+        assert hasattr(self, 'secret') and self.secret
+        plain_text = AES.new(
+            self.secret,
+            self.mode,
+            encrypted_bytes[:self.block_size]
+        ).decrypt(encrypted_bytes[self.block_size:])
+        pad = ord(plain_text[-1])
+        return plain_text[:-pad]
+
+    @SendUser.responder
+    def receiveUser(self, user, crypto):
+        """tell me who you are and i'll tell you a secret"""
+        self.user = user
+#FIXME
+        if AES_CURRENTLY_BROKEN:
+            return {'secret': ''} #AES is currently troublesome
+        if hasattr(self, 'secret') and AES:
+            secret = self.secret
+        elif AES and randpool and crypto:
+            secret = randpool.RandomPool(
+                self.pool_size
+            ).get_bytes(self.key_size)
+        else:
+            secret = ''
+        return {'secret': secret}
+
+#FIXME this is turning into a mess
+    def sendBox(self, box):
+        """overrode to encrypt and encypher messages"""
+        try:
+            if hasattr(self, 'secret') and self.secret:
+                try:
+                    result = self.encodeAES(box.serialize())
+                    return self.transport.write(result)
+                except: pass
+            if hasattr(self, 'keyObj') and self.keyObj and self.trusted:
+                try:
+                    result = self.keyObj.encrypt(box.serialize())
+                    return self.transport.write(result)
+                except: pass
+            try:
+                return amp.AMP.sendBox(self, box)
+            except:
+                if self.transport and hasattr(self.transport, 'loseConnection'):
+                    self.transport.loseConnection()
+        finally:
+            if 'secret' in box:
+                self.secret = box.get('secret','')
+
+#FIXME this is turning into a mess
     def dataReceived(self, data):
+        """overrode to decrypt and decypher messages"""
+        if hasattr(self, 'secret') and self.secret:
+            try:
+                data = self.decodeAES(data)
+                return amp.AMP.dataReceived(self, data)
+            except: pass
         if hasattr(self, 'keyObj') and self.keyObj:
             try:
                 data = self.keyObj.decrypt(data)
-            except: pass #initial conversations are clear
+                return amp.AMP.dataReceived(self, data)
+            except: pass
         try:
             return amp.AMP.dataReceived(self, data)
-        except: self.transport.loseConnection()
+        except:
+            if self.transport and hasattr(self.transport, 'loseConnection'):
+                self.transport.loseConnection()
 
 class DronedServerAMP(DronedProtocol):
     """Implements the server side droned amp protocol"""
@@ -226,6 +323,7 @@ class DronedServerAMP(DronedProtocol):
         self.server = None
         self.hostname = None
         self._key = None
+        self.user = config.DRONED_USER
 
     def loseConnection(self):
         """clean up when the client disconnects."""
@@ -376,7 +474,7 @@ class DronedServerAMP(DronedProtocol):
 
             #get the remote host for this connection
             host = self.transport.getHandle().getpeername()[0]
-            self._logger('Executing "%s" for %s@%s' % (command,self._key,host))
+            self._logger('Executing "%s" for %s@%s' % (command,self.user,host))
             #get the result of the request as a deferred
             data = yield defer.maybeDeferred(func, args).addBoth(
                 self._drone.formatResults)
@@ -453,6 +551,7 @@ class DronedClientAMP(DronedProtocol):
         self.deferred = defer.Deferred()
         self.keyObj = None
         self.trusted = False
+        self.user = 'nobody'
 
     def connectionMade(self):
         result = DronedProtocol.connectionMade(self)
@@ -473,7 +572,7 @@ class DronedClientAMP(DronedProtocol):
         yield self.deferred
         defer.returnValue(self._prime)
 
-    def requestAuthorization(self, keyobj, magic=None, timestamp=None, signature=None):
+    def _requestAuthorization(self, keyobj, magic=None, timestamp=None, signature=None):
         key = keyobj.id
         self.keyObj = keyobj
         if not magic:
@@ -497,6 +596,15 @@ class DronedClientAMP(DronedProtocol):
         d.addCallback(lambda s: setattr(self, 'trusted', True) and s or s)
         d.addErrback(lambda x: self.transport.loseConnection() and x or x)
         return d #return the deferred now.
+
+    @defer.inlineCallbacks
+    def requestAuthorization(self, *args, **kwargs):
+        result = yield self._requestAuthorization(*args, **kwargs)
+        self.user = os.environ.get(
+                'SUDO_USER', os.environ.get('USER', getpass.getuser()))
+        x = yield self.callRemote(SendUser, user=self.user, crypto=bool(AES))
+        self.secret = x['secret']
+        defer.returnValue(result)
 
     @defer.inlineCallbacks
     def executeCommand(self, command):
